@@ -64,3 +64,7 @@ Virtua Fighter is SEGA's. This project is not affiliated with or endorsed by SEG
 
 MIT for this project's own code: see LICENSE. Code from MAME keeps its BSD-3-Clause licence and
 notices; the rest of `third_party/` keeps its own.
+
+## Support
+
+If you enjoy it, you can buy me a coffee: https://buymeacoffee.com/mrfinster
