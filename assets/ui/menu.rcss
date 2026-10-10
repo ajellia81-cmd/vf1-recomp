@@ -1,0 +1,136 @@
+/* The in-game menu. Sizes are in dp: the host sets 1dp = 1/720 of the window's height.
+   Gradients are the vertex-colour kind (horizontal-gradient): the SDL renderer has no shaders.
+
+   One column with a fixed space for each part, so nothing overlaps whatever the page:
+     top 48 + title 73 + crumb 38 + rows 8 x 46 = 368 + note 12 + 96 (4 lines) + hint 12 + 26
+     = 673dp of 720. Longer pages scroll inside the rows; a long value is cut, never drawn
+     over its label. */
+
+body {
+	width: 100%;
+	height: 100%;
+	font-family: "Barlow Condensed";
+	font-weight: 600;
+	font-size: 24dp;
+	color: #dfe7fb;
+}
+
+div { display: block; }
+
+#shade {
+	position: absolute;
+	left: 0; top: 0; right: 0; bottom: 0;
+	decorator: horizontal-gradient(#040818f2 #04081850);
+}
+
+#panel {
+	position: absolute;
+	left: 9%;
+	top: 48dp;
+	width: 520dp;
+}
+
+#title {
+	font-size: 60dp;
+	font-weight: bold;
+	font-style: italic;
+	color: #ffd23f;
+	height: 64dp;
+	line-height: 64dp;
+	padding-bottom: 6dp;
+	border-bottom: 3dp #ffd23f;
+}
+
+#crumb {
+	height: 30dp;
+	line-height: 30dp;
+	margin-bottom: 8dp;
+	font-size: 21dp;
+	font-weight: 500;
+	color: #8fa3d6;
+	white-space: nowrap;
+	overflow: hidden;
+}
+
+#rows {
+	max-height: 368dp;      /* 8 rows; longer pages scroll, keeping the selected row in view */
+	overflow-y: hidden;
+}
+
+.row {
+	display: flex;
+	height: 42dp;
+	line-height: 42dp;
+	padding: 0 18dp;
+	margin-bottom: 4dp;
+	font-size: 27dp;
+	color: #c3cff0;
+	white-space: nowrap;
+	transition: padding-left 0.12s cubic-out;
+}
+
+.row .label {
+	flex: 1 0 auto;
+	margin-right: 18dp;
+}
+
+.row .value {
+	flex: 0 1 auto;
+	overflow: hidden;
+	color: #ffd23f;
+	text-align: right;
+}
+
+.row.selected {
+	decorator: horizontal-gradient(#ffd23f #ff8f1f);
+	color: #0b1430;
+	padding-left: 32dp;
+}
+
+.row.selected .value { color: #0b1430; }
+
+.row .arrow { color: #8fa3d6; }
+.row.selected .arrow { color: #0b1430; }
+
+.row.info {
+	height: 31dp;
+	line-height: 31dp;
+	font-size: 22dp;
+	font-weight: 500;
+	margin-bottom: 0;
+}
+
+.row.info .value { color: #dfe7fb; }
+
+#note {
+	margin-top: 12dp;
+	height: 96dp;           /* four lines; the help texts are written to fit */
+	line-height: 24dp;
+	overflow: hidden;
+	font-size: 20dp;
+	font-weight: 500;
+	color: #8fa3d6;
+}
+
+#hint {
+	margin-top: 12dp;
+	height: 26dp;
+	line-height: 26dp;
+	font-size: 19dp;
+	font-weight: 500;
+	color: #8fa3d6;
+	white-space: nowrap;
+}
+
+.key { color: #dfe7fb; }
+
+/* the version and date, small, under the hint */
+#ver {
+	margin-top: 6dp;
+	height: 22dp;
+	line-height: 22dp;
+	font-size: 17dp;
+	font-weight: 500;
+	color: #5f6f9c;
+	white-space: nowrap;
+}

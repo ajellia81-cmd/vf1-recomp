@@ -1,0 +1,884 @@
+// Sega Model 1 glue: memory map, IRQ controller, timers, ROM banking and the per-frame loop.
+// Follows MAME's src/mame/sega/model1.cpp (BSD-3-Clause, copyright-holders: Olivier Galibert).
+#include "model1.h"
+#include <zlib.h>
+
+namespace {
+constexpr int CPU_CLOCK = 16000000;          // 32 MHz XTAL / 2
+constexpr int H_TOTAL = 656, V_TOTAL = 424;  // 16 MHz pixel clock: 57.52 Hz
+constexpr int VBLANK_LINE = 384;
+constexpr int CYCLES_PER_LINE = H_TOTAL;     // CPU and pixel clocks are both 16 MHz
+}
+
+model1::model1(regions &&r)
+	: m_regions(std::move(r))
+	, m_maincpu(*this, 0xfffffff0)
+	, m_ram_a(0x10000, 0xff)                 // MAME: NVRAM default all 1s (VF's rankings need it)
+	, m_ram_b(0x40000, 0)
+	, m_display_list0_ram(0x8000), m_display_list1_ram(0x8000)
+	, m_paletteram16_ram(0x2000), m_color_xlat_ram(0x6000)
+{
+	m_display_list0 = m_display_list0_ram.data();
+	m_display_list1 = m_display_list1_ram.data();
+	m_paletteram16 = m_paletteram16_ram.data();
+	m_color_xlat = m_color_xlat_ram.data();
+	m_poly_rom = reinterpret_cast<uint32_t *>(m_regions.polygons.data());
+	m_copro_tables = reinterpret_cast<uint32_t *>(m_regions.copro_tables.data());
+	m_copro_ram_data = std::make_unique<u32[]>(0x8000);
+	m_maincpu.irq_vector = [this] { return irq_callback(); };
+	m_copro_fifo_in_q.m_on_push = [this] { copro_hle_vf(); };
+	m_bitmap.allocate(SCREEN_W, SCREEN_H);
+	video_start();
+	if (!m_regions.tgp_program.empty() && !getenv("VF_TGP_SIM"))
+		use_tgp_program(m_regions.tgp_program);
+	if (!m_regions.ioboard.empty() && !getenv("VF_IO_STANDIN"))
+		m_ioboard = std::make_unique<model1io>(m_regions.ioboard, m_dpram);
+}
+
+void model1::reset()
+{
+	for (auto &c : m_layer_cache) c.frame = ~0ull;   // a new game: nothing drawn is current
+	m_shown = m_unshown = false;                      // nor shown
+	m_tiles_updated = ~0ull;
+	m_list_written[0] = m_list_written[1] = ~0ull;
+	m_bank_base = 0x1000000;
+	m_maincpu.set_irq_line(CLEAR_LINE);
+	copro_reset();
+	m_acc = 0;
+	m_mat_stack_pos = 0;
+	m_copro_hle_active_list_length = 0;
+	m_copro_hle_active_list_pos = 0;
+	m_copro_hle_list_length = 0;
+	memset(m_cmat, 0, sizeof(m_cmat));
+	m_cmat[0] = m_cmat[4] = m_cmat[8] = 1.0f;
+	m_copro_fifo_in_q.clear();
+	m_copro_fifo_out_q.clear();
+	lle_reset();
+	m_irq_status = 0;
+	m_last_irq = 0;
+	m_irq_mask = 0xff;
+	m_uart_txbuf = m_uart_shift = m_uart_rx = -1;
+	m_uart_shift_left = m_uart_rx_left = 0;
+	if (m_audio) m_audio->reset();
+	if (m_ioboard) {
+		std::fill(std::begin(m_dpram), std::end(m_dpram), 0);
+		m_ioboard->reset();
+	}
+	m_maincpu.reset();
+}
+
+void model1::copro_reset()
+{
+	m_v60_copro_ram_adr = 0;
+	m_copro_ram_adr = 0;
+	m_copro_sincos_base = 0;
+	m_copro_inv_base = 0;
+	m_copro_isqrt_base = 0;
+	std::fill(std::begin(m_copro_atan_base), std::end(m_copro_atan_base), 0);
+	std::fill(std::begin(m_v60_copro_ram_latch), std::end(m_v60_copro_ram_latch), 0);
+	memset(m_copro_ram_data.get(), 0, 0x8000 * 4);
+}
+
+// ---- frame loop ----
+
+void model1::run_frame()
+{
+	// the picture on screen was drawn from the state this frame is about to change: keep that
+	if (m_smooth && m_shown && m_shown_frame == m_frame) keep_still();
+	for (int line = 0; line < V_TOTAL; line++) {
+		if (line == VBLANK_LINE) {
+			if (!BIT(m_irq_mask, 1))
+				irq_raise(1);
+			// vblank starts: the display lists are scanned and swapped
+			screen_vblank_model1(1);
+		}
+		if (run_cpu)
+			run_cpu(CYCLES_PER_LINE);
+		else {
+			m_maincpu.on_exec = on_instruction;
+			m_maincpu.run(CYCLES_PER_LINE);
+		}
+		timer_tick(CYCLES_PER_LINE);
+		io_board_tick(CYCLES_PER_LINE);
+		uart_tick(CYCLES_PER_LINE);
+		if (m_audio)
+			m_audio->run(CYCLES_PER_LINE * 1e6 / CPU_CLOCK, m_audio_out);
+		if (on_line) on_line(line);
+	}
+	// MAME draws the screen when vblank ends (VIDEO_UPDATE_AFTER_VBLANK): the 2D layers are
+	// as the vblank handler left them
+	if (m_draw) {
+		if (m_smooth) record_frame();     // drawn later, for the moment shown (render_smooth)
+		else screen_update(m_bitmap, m_bitmap.cliprect());
+	}
+	m_frame++;
+}
+
+// ---- IRQs (MAME: irq_raise, irq_callback, irq_control_w, irq_mask_w) ----
+
+void model1::irq_raise(int level)
+{
+	m_irq_status |= (1 << level);
+	m_maincpu.set_irq_line(ASSERT_LINE);
+}
+
+u8 model1::irq_callback()
+{
+	for (int i = 0; i < 8; i++)
+		if (BIT(m_irq_status, i)) {
+			m_last_irq = i;
+			break;
+		}
+	return m_last_irq;
+}
+
+void model1::irq_control_w(u8 data)
+{
+	switch (data) {
+	case 0x10:
+		m_irq_status = 0;
+		m_maincpu.set_irq_line(CLEAR_LINE);
+		break;
+	case 0x20:
+		m_irq_status &= ~(1 << m_last_irq);
+		if (m_irq_status == 0)
+			m_maincpu.set_irq_line(CLEAR_LINE);
+		break;
+	}
+}
+
+u8 model1::irq_mask_r() { return m_irq_mask; }
+
+void model1::irq_mask_w(u8 data)
+{
+	m_irq_mask = data;
+	sound_ready();
+}
+
+// MAME's sound_ready_w: the UART ready to send or holding a byte raises level 3 (VF's sound
+// queue pump) unless it's masked.
+void model1::sound_ready()
+{
+	if ((m_uart_txbuf < 0 || m_uart_rx >= 0) && !BIT(m_irq_mask, 3))
+		irq_raise(3);
+}
+
+void model1::uart_write(uint8_t v)
+{
+	m_uart_txbuf = v;
+	if (m_uart_shift < 0) {           // the shift register takes it at once
+		m_uart_shift = m_uart_txbuf;
+		m_uart_txbuf = -1;
+		m_uart_shift_left = UART_BYTE_CYCLES;
+	}
+	sound_ready();
+}
+
+uint8_t model1::uart_status()
+{
+	uint8_t st = 0x80;                                    // DSR
+	if (m_uart_txbuf < 0) st |= 0x01;                     // TxRDY
+	if (m_uart_rx >= 0) st |= 0x02;                       // RxRDY
+	if (m_uart_txbuf < 0 && m_uart_shift < 0) st |= 0x04; // TxEMPTY
+	return st;
+}
+
+uint8_t model1::uart_read()
+{
+	uint8_t v = m_uart_rx >= 0 ? uint8_t(m_uart_rx) : 0;
+	m_uart_rx = -1;
+	return v;
+}
+
+void model1::uart_tick(int cycles)
+{
+	if (m_uart_shift >= 0 && (m_uart_shift_left -= cycles) <= 0) {
+		if (m_audio) m_audio->rx_byte(uint8_t(m_uart_shift));
+		m_uart_shift = -1;
+		if (m_uart_txbuf >= 0) {
+			m_uart_shift = m_uart_txbuf;
+			m_uart_txbuf = -1;
+			m_uart_shift_left += UART_BYTE_CYCLES;
+			sound_ready();
+		}
+	}
+	// replies from the sound board, at the same rate
+	if (m_uart_rx_left > 0) m_uart_rx_left -= cycles;
+	if (m_audio && m_audio->tx_pending() && m_uart_rx < 0 && m_uart_rx_left <= 0) {
+		m_uart_rx = m_audio->tx_byte();
+		m_uart_rx_left = UART_BYTE_CYCLES;
+		sound_ready();
+	}
+}
+
+void model1::enable_sound()
+{
+	m_audio = std::make_unique<m1audio>(m_regions.sndcpu, m_regions.pcm1, m_regions.pcm2);
+	m_audio->reset();
+}
+
+void model1::set_volumes(float music, float effects)
+{
+	if (m_audio) m_audio->set_volumes(music, effects);
+}
+
+// ---- timers (MAME: 0x800 CPU clocks per count; VF leaves them stopped) ----
+
+u16 model1::timer_r(offs_t offset)
+{
+	if (m_timer_period[offset])
+		m_timer_val[offset] = uint16_t(m_timer_remain[offset] / 0x800);
+	return m_timer_val[offset];
+}
+
+void model1::timer_period_w(offs_t offset, u16 data)
+{
+	m_timer_period[offset] = data;
+	m_timer_remain[offset] = int64_t(0x800) * data;
+}
+
+void model1::timer_tick(int cycles)
+{
+	for (int t = 0; t < 2; t++) {
+		if (!m_timer_period[t])
+			continue;
+		m_timer_remain[t] -= cycles;
+		while (m_timer_remain[t] <= 0) {
+			if (!BIT(m_irq_mask, 0))
+				irq_raise(0);
+			m_timer_remain[t] += int64_t(0x800) * m_timer_period[t];
+		}
+	}
+}
+
+void model1::bank_w(offs_t, u16 data, u16 mem_mask)
+{
+	if ((mem_mask & 0xff) && (data & 0xf) == 1)
+		m_bank_base = 0x1000000 + 0x100000 * ((data >> 4) & 0x7);
+}
+
+// ---- I/O board stand-in ----
+// Byte offsets in the dual-port RAM (V60 address = 0xc00000 + 2 * offset), from MAME 0.190:
+//   00-07 analog inputs (VF has none), 08-0a digital inputs, 0f lamps,
+//   20 command to the board (cleared when done; 3 = EEPROM write), 21 status (0x40),
+//   100-17f the EEPROM image, kept in the shared RAM.
+
+uint8_t model1::io_board_r(int index)
+{
+	m_maincpu.adjust_icount(-1);    // MAME: a wait state on every dual-port RAM read
+	if (m_ioboard) return m_dpram[index];
+	if (index < 0x08) return 0x00;
+	if (index < 0x0b) return m_inputs[index - 0x08];
+	if (index < 0x10) return index == 0x0f ? m_lamps : 0xff;
+	if (index == 0x20) return m_io_command;
+	if (index == 0x21) return 0x40;
+	return m_dpram[index];
+}
+
+void model1::io_board_w(int index, uint8_t data)
+{
+	if (m_ioboard) { m_dpram[index] = data; return; }
+	if (index == 0x0f) { m_lamps = data; return; }
+	if (index == 0x20) {
+		m_io_command = data;
+		// MAME's guess: 10 us, or 100 ms for an EEPROM write
+		m_io_ack = data == 3 ? CPU_CLOCK / 10 : CPU_CLOCK / 100000;
+		return;
+	}
+	m_dpram[index] = data;
+}
+
+void model1::io_board_tick(int cycles)
+{
+	if (m_ioboard) {
+		std::copy(std::begin(m_inputs), std::end(m_inputs), m_ioboard->inputs);
+		m_ioboard->run(cycles * 1e6 / CPU_CLOCK);
+		m_lamps = m_ioboard->outputs;
+		return;
+	}
+	if (m_io_command && (m_io_ack -= cycles) <= 0)
+		m_io_command = 0;
+}
+
+// ---- TGP status ----
+
+u16 model1::fifoin_status_r() { return 0xffff; }
+
+// ---- memory map (MAME: model1_mem / model1_io) ----
+
+uint16_t model1::bus_read16(uint32_t a)
+{
+	a &= 0xfffffe;
+	const uint8_t *rom = m_regions.maincpu.data();
+	auto rd = [](const uint8_t *p) { return uint16_t(p[0] | (p[1] << 8)); };
+	switch (a >> 20) {
+	case 0x0: return rd(rom + a);                                        // ROMA (unpopulated)
+	case 0x1: return rd(rom + m_bank_base + (a & 0xfffff));             // ROMO, banked data
+	case 0x2: return rd(rom + a);                                        // ROMX
+	case 0xf: return a >= 0xf80000 ? rd(rom + a) : 0xffff;              // ROM0
+	}
+	if (a >= 0x400000 && a < 0x410000) return rd(&m_ram_a[a - 0x400000]);
+	if (a >= 0x500000 && a < 0x540000) return rd(&m_ram_b[a - 0x500000]);
+	if (a >= 0x600000 && a < 0x610000) return m_display_list0[(a - 0x600000) >> 1];
+	if (a >= 0x610000 && a < 0x620000) return m_display_list1[(a - 0x610000) >> 1];
+	if (a >= 0x680000 && a < 0x680004) return model1_listctl_r((a - 0x680000) >> 1);
+	if (a >= 0x700000 && a < 0x710000) return m_tiles.tile_r((a - 0x700000) >> 1);
+	if (a >= 0x780000 && a < 0x800000) return m_tiles.char_r((a - 0x780000) >> 1);
+	if (a >= 0x900000 && a < 0x904000) return m_paletteram16[(a - 0x900000) >> 1];
+	if (a >= 0x910000 && a < 0x91c000) return m_color_xlat[(a - 0x910000) >> 1];
+	if (a >= 0xc00000 && a < 0xc01000) return 0xff00 | io_board_r(((a - 0xc00000) >> 1) & 0x7ff);
+	if (a >= 0xc40000 && a < 0xc40004) return 0xff00 | ((a & 2) ? uart_status() : uart_read());
+	if (m_lle && a >= 0xd00000 && a < 0xde0000) return lle_v60_r(a);
+	if (a >= 0xd00000 && a < 0xd20000) return v60_copro_ram_adr_r(0, 0xffff);
+	if (a >= 0xd20000 && a < 0xd40000) return v60_copro_ram_r((a >> 1) & 1, 0xffff);
+	if (a >= 0xd80000 && a < 0xda0000) return v60_copro_fifo_r((a >> 1) & 1, 0xffff);
+	if (a >= 0xdc0000 && a < 0xde0000) return fifoin_status_r();
+	if (a == 0xe00002) return m_irq_mask;
+	if (a >= 0xe0000c && a < 0xe00010) return timer_r((a >> 1) & 1);
+	return 0xffff;
+}
+
+void model1::bus_write16(uint32_t a, uint16_t v, uint16_t mask)
+{
+	a &= 0xfffffe;
+	static uint32_t watch_lo = 1, watch_hi = 0;      // debug: VF_WATCHW=addr or lo-hi (hex)
+	static const bool watch_init = [] {
+		if (const char *w = getenv("VF_WATCHW")) {
+			char *end;
+			watch_lo = watch_hi = strtoul(w, &end, 16);
+			if (*end == '-') watch_hi = strtoul(end + 1, nullptr, 16);
+		}
+		return true;
+	}();
+	(void)watch_init;
+	if (a >= watch_lo && a <= watch_hi)
+		fprintf(stderr, "frame %llu: write %06x = %04x/%04x pc %06x\n", (unsigned long long)m_frame, a, v, mask, m_maincpu.pc());
+	auto wr = [&](uint8_t *p) {
+		if (mask & 0x00ff) p[0] = uint8_t(v);
+		if (mask & 0xff00) p[1] = uint8_t(v >> 8);
+	};
+	auto combine = [&](uint16_t &d) { d = (d & ~mask) | (v & mask); };
+	if (a >= 0x400000 && a < 0x410000) { wr(&m_ram_a[a - 0x400000]); return; }
+	if (a >= 0x500000 && a < 0x540000) { wr(&m_ram_b[a - 0x500000]); return; }
+	if (a >= 0x600000 && a < 0x610000) { combine(m_display_list0[(a - 0x600000) >> 1]); m_list_written[0] = m_frame; return; }
+	if (a >= 0x610000 && a < 0x620000) { combine(m_display_list1[(a - 0x610000) >> 1]); m_list_written[1] = m_frame; return; }
+	if (a >= 0x680000 && a < 0x680004) { model1_listctl_w((a - 0x680000) >> 1, v, mask); return; }
+	if (a >= 0x700000 && a < 0x710000) {
+		m_tiles.tile_w((a - 0x700000) >> 1, v, mask);
+		if (a == 0x70a004 || a == 0x70a00c) sky_scroll_written(a);   // the sky's scroll (model1_interp.cpp)
+		return;
+	}
+	if (a >= 0x780000 && a < 0x800000) { m_tiles.char_w((a - 0x780000) >> 1, v, mask); return; }
+	if (a >= 0x900000 && a < 0x904000) { model1_paletteram_w((a - 0x900000) >> 1, v, mask); return; }
+	if (a >= 0x910000 && a < 0x91c000) { combine(m_color_xlat[(a - 0x910000) >> 1]); return; }
+	if (a >= 0xc00000 && a < 0xc01000) { if (mask & 0xff) io_board_w(((a - 0xc00000) >> 1) & 0x7ff, uint8_t(v)); return; }
+	if (a == 0xc40000) { if (mask & 0xff) uart_write(uint8_t(v)); return; }
+	if (a == 0xc40002) return;                                   // i8251 mode/command
+	if (m_lle && a >= 0xd00000 && a < 0xde0000) { lle_v60_w(a, v, mask); return; }
+	if (a >= 0xd00000 && a < 0xd20000) { v60_copro_ram_adr_w(0, v, mask); return; }
+	if (a >= 0xd20000 && a < 0xd40000) { v60_copro_ram_w((a >> 1) & 1, v, mask); return; }
+	if (a >= 0xd80000 && a < 0xda0000) { v60_copro_fifo_w((a >> 1) & 1, v, mask); return; }
+	if (a == 0xe00000) { if (mask & 0xff) irq_control_w(uint8_t(v)); return; }
+	if (a == 0xe00002) { if (mask & 0xff) irq_mask_w(uint8_t(v)); return; }
+	if (a == 0xe00004) { bank_w(0, v, mask); return; }
+	if (a == 0xe00006) { combine(m_timer_mode); return; }
+	if (a >= 0xe00008 && a < 0xe0000c) { timer_period_w((a >> 1) & 1, v); return; }
+}
+
+uint8_t model1::read8(uint32_t a) { return uint8_t(bus_read16(a) >> ((a & 1) * 8)); }
+void model1::write8(uint32_t a, uint8_t v) { bus_write16(a, uint16_t(v) << ((a & 1) * 8), (a & 1) ? 0xff00 : 0x00ff); }
+
+uint16_t model1::read16(uint32_t a)
+{
+	if (a & 1) return read8(a) | (read8(a + 1) << 8);
+	return bus_read16(a);
+}
+
+void model1::write16(uint32_t a, uint16_t v)
+{
+	if (a & 1) { write8(a, uint8_t(v)); write8(a + 1, uint8_t(v >> 8)); return; }
+	bus_write16(a, v, 0xffff);
+}
+
+uint32_t model1::read32(uint32_t a) { return read16(a) | (uint32_t(read16(a + 2)) << 16); }
+void model1::write32(uint32_t a, uint32_t v) { write16(a, uint16_t(v)); write16(a + 2, uint16_t(v >> 16)); }
+
+uint16_t model1::io_read16(uint32_t a) { return bus_read16(a); }
+void model1::io_write16(uint32_t a, uint16_t v) { bus_write16(a, v, 0xffff); }
+
+// ---- render scale ----
+
+void model1::set_render_scale(int scale)
+{
+	m_scale = std::clamp(scale, 1, 12);       // up to 6x, or less with antialiasing on top
+	s_moire_blend = m_scale > 1;
+	s_hd_raster = m_scale > 1 && !getenv("VF_MAME_RASTER");
+	resize_frame();
+}
+
+void model1::set_aspect(float aspect)
+{
+	m_aspect = std::clamp(aspect, 4.0f / 3.0f, 32.0f / 9.0f);
+	// the arcade's pixels are slightly wide: 496x384 fills a 4:3 tube
+	float width = SCREEN_H * m_aspect * float(SCREEN_W) / (SCREEN_H * 4.0f / 3.0f);
+	m_ext = std::max(0, int(std::lround((width - SCREEN_W) / 2)));
+	resize_frame();
+}
+
+void model1::resize_frame()
+{
+	// the view's clip is kept in render pixels: undo the old widening before changing it
+	view_t *v = m_view.get();
+	float gx1 = v->lx1, gx2 = v->lx2;
+	if (v->ext > 0 && v->lx1 < 0) { gx1 += v->ext; gx2 -= v->ext; }
+	m_bitmap.allocate((SCREEN_W + 2 * m_ext) * m_scale, SCREEN_H * m_scale);
+	m_bitmap_whole = true;                    // (not KEY yet, for the GPU's parts)
+	m_tile_tmp.allocate(SCREEN_W + 2 * m_ext, SCREEN_H);
+	m_tiles.m_ox = 0;
+	v->scale = float(m_scale);
+	v->ext = float(m_ext);
+	v->set_viewport(v->xc, v->yc, gx1, gx2, v->ly1, v->ly2);
+	// the above-HUD pass's buffers: made when first needed (never in VF; they'd be two frames' worth)
+	m_overlay_stride = m_bitmap.width();
+	m_overlay_block.reset();
+	m_overlay_hud_snapshot.reset();
+}
+
+// VF's settings in the 93C46: "SEGA" in words 0-1, a CRC-16 (XMODEM, of words 8-63 high byte
+// first) in word 4 stored low byte first, and the coin/credit setting in word 8's high byte:
+// setting #26 (0x19) is FREE PLAY, with word 10's high byte set.
+// edit(e) changes the words and says whether it did; false too when the game hasn't written its
+// settings yet (its first boot does).
+template <class F>
+static bool edit_settings(uint16_t *ioboard, uint8_t *standin, F edit)
+{
+	// The real I/O board's 93C46 holds 16-bit words; the stand-in's image (without model1io.zip)
+	// is the same settings with each word's bytes the other way round.
+	uint16_t words[64];
+	if (standin)
+		for (int i = 0; i < 64; i++) words[i] = uint16_t(standin[2 * i] << 8 | standin[2 * i + 1]);
+	uint16_t *e = ioboard ? ioboard : words;
+	if (e[0] != 0x5345 || e[1] != 0x4741 || !edit(e)) return false;
+	uint16_t crc = 0;
+	for (int i = 8; i < 64; i++)
+		for (uint8_t byte : { uint8_t(e[i] >> 8), uint8_t(e[i]) }) {
+			crc ^= uint16_t(byte << 8);
+			for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? uint16_t((crc << 1) ^ 0x1021) : uint16_t(crc << 1);
+		}
+	e[4] = uint16_t(crc << 8 | crc >> 8);
+	if (standin)
+		for (int i = 0; i < 64; i++) { standin[2 * i] = uint8_t(words[i] >> 8); standin[2 * i + 1] = uint8_t(words[i]); }
+	return true;
+}
+
+bool model1::force_free_play()
+{
+	return edit_settings(m_ioboard ? m_ioboard->eeprom : nullptr, m_ioboard ? nullptr : eeprom(), [](uint16_t *e) {
+		if ((e[8] >> 8) == 0x19) return false;
+		e[8] = uint16_t((e[8] & 0x00ff) | 0x1900);
+		e[10] = uint16_t((e[10] & 0x00ff) | 0x0100);
+		return true;
+	});
+}
+
+// GAME ASSIGNMENTS in the 93C46 (found by changing each in test mode): the word, and the byte in it
+static constexpr struct { int word, shift, lo, hi; } ASSIGNMENTS[] = {
+	{ 24, 8, 2, 5 },   // MATCH COUNT (1P): rounds to win
+	{ 24, 0, 2, 5 },   // MATCH COUNT (VS)
+	{ 16, 8, 0, 3 },   // DIFFICULTY: EASY, NORMAL, HARD, HARDEST
+	{ 29, 8, 0, 1 },   // ADVERTISE SOUND
+	{ 27, 0, 0, 1 },   // CONTINUE
+};
+
+int model1::assignment(game_assignment a)
+{
+	const auto &s = ASSIGNMENTS[int(a)];
+	int v = -1;
+	edit_settings(m_ioboard ? m_ioboard->eeprom : nullptr, m_ioboard ? nullptr : eeprom(), [&](uint16_t *e) {
+		v = std::clamp((e[s.word] >> s.shift) & 0xff, s.lo, s.hi);
+		return false;
+	});
+	return v;
+}
+
+bool model1::set_assignment(game_assignment a, int v)
+{
+	const auto &s = ASSIGNMENTS[int(a)];
+	v = std::clamp(v, s.lo, s.hi);
+	return edit_settings(m_ioboard ? m_ioboard->eeprom : nullptr, m_ioboard ? nullptr : eeprom(), [&](uint16_t *e) {
+		if (((e[s.word] >> s.shift) & 0xff) == v) return false;
+		e[s.word] = uint16_t((e[s.word] & ~(0xff << s.shift)) | v << s.shift);
+		return true;
+	});
+}
+
+bool model1::patch_program(uint32_t addr, size_t n, uint32_t crc, const uint8_t *to)
+{
+	auto &rom = m_regions.maincpu;
+	if (addr + n > rom.size() || ::crc32(0, &rom[addr], uInt(n)) != crc) return false;
+	memcpy(&rom[addr], to, n);
+	return true;
+}
+
+// The ring's width for EASY..HARDEST in 20s (1500, 1400, 1300, 1200), read as each match starts;
+// the energy for each (16-bit) follows it.
+bool model1::set_ring_width(int width)
+{
+	constexpr uint32_t TABLE = 0xfcc9f6;
+	static const uint8_t ARCADE[4] = { 75, 70, 65, 60 }, ENERGY[8] = { 0xdc, 0, 0xc8, 0, 0xb4, 0, 0xa0, 0 };
+	auto &rom = m_regions.maincpu;
+	if (TABLE + 12 > rom.size() || memcmp(&rom[TABLE + 4], ENERGY, 8)) return false;
+	for (int i = 0; i < 4; i++)
+		if (rom[TABLE + i] < 50 || rom[TABLE + i] > 100) return false;   // not VF's table (or ours)
+	for (int i = 0; i < 4; i++) rom[TABLE + i] = width ? uint8_t(width / 20) : ARCADE[i];
+	return true;
+}
+
+int model1::hide_free_play_text()
+{
+	int found = 0;
+	// The italic FREE PLAY (attract, title): a 14x2 tile image drawn by the routine at ff39a3
+	// from a record (base tile, flags, rows, columns, then a byte per tile). Base tile 0x0020,
+	// the blank the text layer is cleared with, and every byte 0: blank cells.
+	uint8_t blank_image[12 + 28] = { 0x20, 0x00, 0, 0, 2, 0, 0, 0, 14, 0, 0, 0 };
+	found += patch_program(0x13c01c2, sizeof blank_image, 0x71d41cda, blank_image);
+	// The fight's "FREE PLAY" (top right, between PUSH START BUTTON): a padded string.
+	const uint8_t spaces[9] = { ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
+	found += patch_program(0xfd080f, sizeof spaces, 0x9dbd988f, spaces);
+	return found;
+}
+
+// Widescreen is for the fight. VF keeps a pointer to the camera it last sent to the display list
+// at 5017f0: the fight's camera (also used by the attract demo, the win and continue screens) is
+// at 5020f0; the title and the player select use others and stay 4:3. The pointer is cleared
+// every other frame (forcing a resend), so 0 keeps the last choice.
+void model1::redraw()
+{
+	const auto render_done = m_render_done;     // emulation state: drawing again mustn't touch it
+	const int quads = m_last_quads;
+	if (!m_smooth)
+		screen_update(m_bitmap, m_bitmap.cliprect());   // the frame drawn as it ran: nothing has moved since
+	else if (!m_shown)
+		m_bitmap.fill(0);                               // nothing shown since the start or a reset
+	else {
+		// Smooth motion: the moment shown, which is a game frame behind the newest list, and when
+		// frames ran on without a new picture shown (a held scene change, the hold after a camera
+		// cut), older still: then drawn from what was kept as the next frame started.
+		const bool old = m_shown_frame != m_frame && m_still.frame == m_shown_frame;
+		if (old) swap_still();
+		m_redrawing = true;
+		render_smooth(m_shown_now);
+		m_redrawing = false;
+		if (old) swap_still();
+	}
+	m_unshown = false;
+	m_render_done = render_done;
+	m_last_quads = quads;
+}
+
+bool model1::past_boot() const
+{
+	const uint8_t *p = &m_ram_b[0x17f0];
+	return (p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24) != 0;
+}
+
+bool model1::fight_camera() const
+{
+	const uint8_t *p = &m_ram_b[0x17f0];
+	uint32_t cam = p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24;
+	if (cam == 0) return m_fight_cam;
+	return cam == 0x5020f0;
+}
+
+// A layer at the arcade's resolution (and the widescreen sides), drawn once a game frame, with each
+// row's drawn span, so the scaling skips what's empty (the HUD and text layers are mostly empty).
+model1::layer_cache &model1::cached_layer(int layer, int flags)
+{
+	constexpr uint32_t KEY = 0xff000000;
+	layer_cache &c = m_layer_cache[layer & 7];
+	const int tw = SCREEN_W + 2 * m_ext;
+	if (c.frame != m_frame || c.flags != flags || c.ext != m_ext || c.px.width() != tw) {
+		if (c.px.width() != tw) c.px.allocate(tw, SCREEN_H);
+		c.px.fill(KEY);
+		if (!m_layers_together) m_tiles.m_ox = m_ext;     // (else set for them all)
+		m_tiles.draw(c.px, c.px.cliprect(), layer, 0, flags);
+		if (!m_layers_together) m_tiles.m_ox = 0;
+		c.x0.assign(SCREEN_H, 0);
+		c.x1.assign(SCREEN_H, 0);
+		for (int y = 0; y < SCREEN_H; y++) {
+			const uint32_t *r = &c.px.pix(y);
+			int a = 0, b = tw;
+			while (a < tw && r[a] == KEY) a++;
+			if (a == tw) continue;
+			while (b > a && r[b - 1] == KEY) b--;
+			c.x0[y] = int16_t(a); c.x1[y] = int16_t(b);
+		}
+		c.frame = m_frame; c.flags = flags; c.ext = m_ext; c.gen++;
+	}
+	return c;
+}
+
+// This frame's layers but the sky, each on a thread of its own (they don't depend on one another).
+void model1::prepare_layers()
+{
+	if (m_scale == 1 && m_ext == 0) return;          // (the arcade's picture draws them straight in)
+	static const int LAYERS[] = { 6, 2, 0, 7, 5, 3, 1 };
+	int todo[7], n = 0;
+	const int tw = SCREEN_W + 2 * m_ext;
+	for (int l : LAYERS) {
+		const int flags = l == 6 ? segas24_tile::DRAW_OPAQUE : 0;
+		const layer_cache &c = m_layer_cache[l];
+		if (c.frame != m_frame || c.flags != flags || c.ext != m_ext || c.px.width() != tw) todo[n++] = l;
+	}
+	if (n < 2) return;
+	m_tiles.m_ox = m_ext;
+	m_layers_together = true;
+	parallel_jobs(n, [&](int i) { cached_layer(todo[i], todo[i] == 6 ? segas24_tile::DRAW_OPAQUE : 0); });
+	m_layers_together = false;
+	m_tiles.m_ox = 0;
+}
+
+// The 2D layers are drawn at the arcade's resolution and scaled up to the render's.
+void model1::draw_tiles(bitmap_rgb32 &bitmap, const rectangle &cliprect, int layer, int flags)
+{
+	static const int skip = getenv("VF_TILE_SKIP") ? strtol(getenv("VF_TILE_SKIP"), nullptr, 16) : 0;
+	if (skip & (1 << layer)) return;
+	if (m_scale == 1 && m_ext == 0) {
+		m_tiles.m_ox = 0;
+		m_tiles.draw(bitmap, cliprect, layer, 0, flags);
+		return;
+	}
+	constexpr uint32_t KEY = 0xff000000;     // pixels are 0x00rrggbb: never the key
+	bitmap_rgb32 *tmp = &m_tile_tmp;
+	const int16_t *rx0 = nullptr, *rx1 = nullptr;    // each row's drawn span (cached layers)
+	bool sky = false;
+	if (layer == 4 && (flags & segas24_tile::DRAW_OPAQUE)) {
+		// the sky layer: note where each pixel came from, for a hi-res replacement (drawn once a game
+		// frame; which panorama and where, every time)
+		if (m_skies.empty()) init_skies();
+		sky = !m_skies.empty() && m_wide_frame;
+		if (m_l4_frame != m_frame || m_l4_ext != m_ext || m_l4_coords != sky || m_tile_tmp.width() != SCREEN_W + 2 * m_ext) {
+			m_tile_tmp.fill(KEY);
+			m_tiles.m_ox = m_ext;
+			if (sky) {
+				m_tile_coord.assign(size_t(m_tile_tmp.width()) * m_tile_tmp.height(), ~0u);
+				m_tiles.m_coord = m_tile_coord.data();
+			}
+			m_tiles.draw(m_tile_tmp, m_tile_tmp.cliprect(), layer, 0, flags);
+			m_tiles.m_coord = nullptr;
+			m_tiles.m_ox = 0;
+			m_l4_frame = m_frame; m_l4_ext = m_ext; m_l4_coords = sky; m_l4_gen++;
+		}
+		if (sky) find_sky();
+	} else {
+		layer_cache &c = cached_layer(layer, flags);
+		tmp = &c.px; rx0 = c.x0.data(); rx1 = c.x1.data();
+	}
+	// Widescreen: the opaque layers are VF's sky, which only holds the visible part of its
+	// panorama; stretch it across the width. The rest (text, HUD) stays in the middle 4:3.
+	const bool stretch = m_ext && m_wide_frame && (flags & segas24_tile::DRAW_OPAQUE);
+	const int s = m_scale;
+	const int out_w = bitmap.width();
+	// smooth motion: the sky between two game frames, moved by the blended scroll at full resolution
+	float sdx = 0, sdy = 0;
+	if (layer == 4 && (flags & segas24_tile::DRAW_OPAQUE)) smooth_sky_shift(sdx, sdy);
+	// a hi-res sky draws over every row of this layer: nothing to draw beneath it
+	if (sky && m_sky_now) { draw_sky(bitmap, sdx, sdy); return; }
+	if (m_parts) { parts_layer(layer, flags, *tmp, stretch, sdx, sdy); return; }   // the GPU enlarges it
+	if (sdx != 0 || sdy != 0) {
+		const int oy = sky_shift_y(sdy, s), ox = sky_shift_x(sdx, s);
+		const int x0 = stretch ? 0 : m_ext * s, x1 = stretch ? out_w : (m_ext + SCREEN_W) * s;
+		auto fdiv = [](int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); };
+		m_col_src.resize(out_w);
+		for (int X = x0; X < x1; X++) {
+			const int lx = stretch ? m_ext + int(std::floor((X + 0.5f) * SCREEN_W / out_w + sdx)) : fdiv(X + ox, s);
+			m_col_src[X] = std::clamp(lx, m_ext, m_ext + SCREEN_W - 1);
+		}
+		parallel_rows(SCREEN_H * s, [&](int Y0, int Y1) {
+			for (int Y = Y0; Y < Y1; Y++) {
+				const int ly = std::clamp(fdiv(Y + oy, s), 0, SCREEN_H - 1);
+				if (rx0 && rx0[ly] >= rx1[ly]) continue;   // nothing on this row
+				const uint32_t *src = &tmp->pix(ly);
+				uint32_t *d = &bitmap.pix(Y);
+				for (int X = x0; X < x1; X++) {
+					const uint32_t c = src[m_col_src[X]];
+					if (c != KEY) d[X] = c;
+				}
+			}
+		});
+		return;
+	}
+	parallel_rows(SCREEN_H, [&](int ya, int yb) {
+	for (int y = ya; y < yb; y++) {
+		if (rx0 && rx0[y] >= rx1[y]) continue;     // nothing on this row
+		const uint32_t *src = &tmp->pix(y);
+		if (stretch) {
+			uint32_t *d0 = &bitmap.pix(y * s);
+			for (int x = 0; x < out_w; x++) {
+				uint32_t c = src[m_ext + int((x + 0.5f) * SCREEN_W / out_w)];
+				if (c != KEY) d0[x] = c;
+			}
+			for (int dy = 1; dy < s; dy++)
+				memcpy(&bitmap.pix(y * s + dy), d0, out_w * 4);
+			continue;
+		}
+		const int xa = rx0 ? rx0[y] : 0, xb = rx0 ? rx1[y] : tmp->width();
+		for (int x = xa; x < xb; x++) {
+			uint32_t c = src[x];
+			if (c == KEY) continue;
+			for (int dy = 0; dy < s; dy++) {
+				uint32_t *d = &bitmap.pix(y * s + dy, x * s);
+				for (int dx = 0; dx < s; dx++) d[dx] = c;
+			}
+		}
+		// Widescreen: a row this layer covers from edge to edge is a curtain (the black that hides
+		// a stage change): carry each end out across its side.
+		const uint32_t el = src[m_ext], er = src[m_ext + SCREEN_W - 1];
+		if (m_ext && m_wide_frame && el != KEY && er != KEY) {
+			int covered = 0;
+			for (int x = m_ext; x < m_ext + SCREEN_W; x++) covered += src[x] != KEY;
+			if (covered * 10 >= SCREEN_W * 9)
+				for (int dy = 0; dy < s; dy++) {
+					uint32_t *d = &bitmap.pix(y * s + dy);
+					std::fill(d, d + m_ext * s, el);
+					std::fill(d + (m_ext + SCREEN_W) * s, d + bitmap.width(), er);
+				}
+		}
+	}
+	});
+}
+
+// ---- screen: MAME's screen_update_model1 ----
+
+void model1::screen_update(bitmap_rgb32 &bitmap, const rectangle &cliprect)
+{
+	view_t *view = m_view.get();
+	view->ayyc = cos(view->ayy);
+	view->ayys = sin(view->ayy);
+
+	if (m_tiles_updated != m_frame) { m_tiles.update(m_pens); m_tiles_updated = m_frame; }   // (once per game frame)
+	prepare_layers();
+	if (m_parts) parts_begin(bitmap);                // the GPU fills it, and the 3D goes over nothing
+	else { bitmap.fill(m_pens[0], cliprect); m_bitmap_whole = true; }
+	static const bool log_scroll = getenv("VF_LOG_SCROLL") != nullptr;
+	if (log_scroll)
+		fprintf(stderr, "frame %llu tm2 h %04x v %04x tm3 h %04x v %04x ctrl %04x %04x\n", (unsigned long long)m_frame,
+				m_tiles.tile_r(0x5002), m_tiles.tile_r(0x5006), m_tiles.tile_r(0x5003), m_tiles.tile_r(0x5007),
+				m_tiles.tile_r(0x5004), m_tiles.tile_r(0x5006));
+	m_fight_cam = fight_camera();
+	if (m_ext) {
+		bool wide = m_fight_cam;
+		static const bool log_wide = getenv("VF_LOG_WIDE") != nullptr;
+		if (log_wide && wide != m_wide_frame)
+			fprintf(stderr, "frame %llu: %s\n", (unsigned long long)m_frame, wide ? "wide" : "4:3");
+		m_wide_frame = wide;
+	}
+
+	static const bool log_backdrop = getenv("VF_LOG_BACKDROP") != nullptr;
+	if (log_backdrop) {
+		static uint32_t last = 0;
+		const uint32_t h = backdrop_hash();
+		if (h != last)
+			fprintf(stderr, "frame %llu backdrop %08x scroll %04x %04x cam %02x%02x%02x%02x\n", (unsigned long long)m_frame, h,
+					m_tiles.tile_r(0x5002), m_tiles.tile_r(0x5006), m_ram_b[0x17f3], m_ram_b[0x17f2], m_ram_b[0x17f1], m_ram_b[0x17f0]);
+		last = h;
+	}
+	m_screen_now = nullptr;
+	if (m_ext && !m_wide_frame && !m_screens.empty()) {
+		const uint32_t h = backdrop_hash();
+		for (const auto &a : m_screens)
+			if (a.hash == h) m_screen_now = &a;
+	}
+	if (m_parts && m_screen_now) { m_parts_whole = true; return; }   // (its painted sides: drawn whole)
+	draw_tiles(bitmap, cliprect, 6, segas24_tile::DRAW_OPAQUE);
+	draw_tiles(bitmap, cliprect, 4, segas24_tile::DRAW_OPAQUE);
+	if (m_screen_now) draw_screen_sides(bitmap);
+	if (m_parts) {
+		parts_composite(m_mid, m_mid_key, m_mid_gen, { 2, 0 });
+		m_parts->img[TEX_MID] = { &m_mid.pix(0), m_mid.width(), m_mid.height(), size_t(m_mid.width()), m_mid_gen };
+		gpu_op o; o.tex = TEX_MID; o.sw = float(m_mid.width()); o.sh = SCREEN_H; o.dw = float(m_mid.width() * m_scale); o.dh = float(SCREEN_H * m_scale);
+		m_parts->ops.push_back(o);
+		o.tex = TEX_3D; o.sw = o.dw = float(bitmap.width()); o.sh = o.dh = float(bitmap.height());
+		m_parts->ops.push_back(o);                   // (drawn below, before the host puts it on)
+	} else {
+		draw_tiles(bitmap, cliprect, 2, 0);
+		draw_tiles(bitmap, cliprect, 0, 0);
+	}
+
+	static const bool no_polys = getenv("VF_NO_POLYS") != nullptr;   // debug: the 2D layers alone
+	m_above_hud_seen = false;
+	m_frame_quads = 0;
+	if (!no_polys) tgp_render(bitmap, cliprect, RENDER_BELOW_HUD);
+	clear_moire_marks(bitmap, cliprect);
+
+	if (m_parts) {
+		parts_composite(m_top, m_top_key, m_top_gen, { 7, 5, 3, 1 });
+		m_parts->img[TEX_TOP] = { &m_top.pix(0), m_top.width(), m_top.height(), size_t(m_top.width()), m_top_gen };
+		gpu_op o; o.tex = TEX_TOP; o.sw = float(m_top.width()); o.sh = SCREEN_H; o.dw = float(m_top.width() * m_scale); o.dh = float(SCREEN_H * m_scale);
+		m_parts->ops.push_back(o);
+		if (m_above_hud_seen) m_parts_whole = true;   // (another Model 1 game's: not VF's)
+	} else {
+		draw_tiles(bitmap, cliprect, 7, 0);
+		draw_tiles(bitmap, cliprect, 5, 0);
+		draw_tiles(bitmap, cliprect, 3, 0);
+		draw_tiles(bitmap, cliprect, 1, 0);
+	}
+
+	// The above-HUD pass and its stencil copy the whole frame twice: only when there is something
+	// to draw there (never in VF; it is for the other Model 1 games' radar blips).
+	if (m_above_hud_seen && !no_polys) {
+		build_overlay_mask(bitmap, cliprect);
+		tgp_render(bitmap, cliprect, RENDER_ABOVE_HUD);
+		apply_overlay_stencil(bitmap, cliprect);
+	}
+	clear_moire_marks(bitmap, cliprect);
+	m_last_quads = m_frame_quads;
+	if (m_parts && !(m_ext && !m_wide_frame && !m_screen_now)) parts_end(bitmap);
+	if (m_ext && !m_wide_frame && !m_screen_now) {   // 4:3 screens without a picture's sides: black
+		const int l = m_ext * m_scale, r = (m_ext + SCREEN_W) * m_scale;
+		if (m_parts) {
+			gpu_op o;
+			o.dw = float(l); o.dh = float(bitmap.height());
+			m_parts->ops.push_back(o);
+			o.dx = float(r); o.dw = float(bitmap.width() - r);
+			m_parts->ops.push_back(o);
+			parts_end(bitmap);
+			return;
+		}
+		for (int y = cliprect.min_y; y <= cliprect.max_y; y++) {
+			uint32_t *p = &bitmap.pix(y);
+			std::fill(p, p + l, 0);
+			std::fill(p + r, p + bitmap.width(), 0);
+		}
+	}
+}
+
+
+// Above 1x shadows mark the pixels they shade (see draw_hline_moired); drop the marks.
+void model1::clear_moire_marks(bitmap_rgb32 &bitmap, const rectangle &cliprect)
+{
+	if (!s_moire_blend) return;
+	const int y1 = std::max(cliprect.min_y, s_mark_y1), y2 = std::min(cliprect.max_y, s_mark_y2);
+	s_mark_y1 = 1 << 30;
+	s_mark_y2 = -1;
+	for (int y = y1; y <= y2; y++) {
+		uint32_t *p = &bitmap.pix(y);
+		for (int x = cliprect.min_x; x <= cliprect.max_x; x++) {
+			if (p[x] == KEY) continue;              // (KEY: nothing drawn there, in the GPU's parts)
+			if ((p[x] >> 24) == SHADOW_KEY >> 24) {   // a shadow over the 2D: blended with it now
+				p[x] = ((parts_below(x, y) >> 1) & 0x7f7f7f) + (p[x] & 0x7f7f7f);
+				continue;
+			}
+			p[x] &= 0xffffff;
+		}
+	}
+}
+
+// A fingerprint of the backdrop map (the tile map layers 4 and 5 draw): which full-screen picture
+// is up (title, player select, ranking), whatever its palette is doing.
+uint32_t model1::backdrop_hash() const
+{
+	uint32_t h = 2166136261u;
+	for (int i = 0; i < 0x1000; i++) h = (h ^ m_tiles.tile_r(0x2000 + i)) * 16777619u;
+	return h;
+}

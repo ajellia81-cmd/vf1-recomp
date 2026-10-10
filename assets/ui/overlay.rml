@@ -1,0 +1,19 @@
+<rml>
+<head>
+	<title>Overlay</title>
+	<style>
+		/* drawn over the game: the frames per second, small, at the top right (Display > Show FPS) */
+		body { width: 100%; height: 100%; font-family: "Barlow Condensed"; pointer-events: none; }
+		#fps {
+			position: absolute;
+			right: 18dp;
+			top: 12dp;
+			font-size: 22dp;
+			font-weight: 600;
+			color: #ffd23f;
+			font-effect: outline(2dp #0b1430);
+		}
+	</style>
+</head>
+<body><div id="fps"></div></body>
+</rml>

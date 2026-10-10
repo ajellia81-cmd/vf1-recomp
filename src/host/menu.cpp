@@ -1,0 +1,355 @@
+#include "menu.h"
+#include <RmlUi/Core.h>
+#include "RmlUi_Platform_SDL.h"
+#include "RmlUi_Renderer_SDL.h"
+#include <cstdlib>
+
+namespace {
+
+std::string escape(const std::string &s)
+{
+	std::string o;
+	for (char c : s) {
+		if (c == '&') o += "&amp;";
+		else if (c == '<') o += "&lt;";
+		else if (c == '>') o += "&gt;";
+		else o += c;
+	}
+	return o;
+}
+
+int first_selectable(const menu_page &p)
+{
+	for (size_t i = 0; i < p.items.size(); i++)
+		if (!p.items[i].info) return int(i);
+	return 0;
+}
+
+} // namespace
+
+// Mouse over a row selects it; a click selects and uses it.
+struct menu_listener : Rml::EventListener
+{
+	game_menu *menu = nullptr;
+	void ProcessEvent(Rml::Event &ev) override
+	{
+		Rml::Element *e = ev.GetTargetElement();
+		while (e && !e->IsClassSet("row")) e = e->GetParentNode();
+		if (!e || e->IsClassSet("info")) return;
+		const int i = atoi(e->GetId().c_str() + 1);
+		menu->select(i);
+		if (ev.GetId() == Rml::EventId::Click) {
+			const menu_item &it = menu->m_stack.back().items[i];
+			if (it.activate) menu->activate();
+			else if (it.change) menu->change(+1);
+		}
+	}
+};
+
+struct game_menu::impl
+{
+	SDL_Window *win = nullptr;
+	SDL_Renderer *ren = nullptr;
+	std::unique_ptr<SystemInterface_SDL> sys;
+	std::unique_ptr<RenderInterface_SDL> gfx;
+	Rml::Context *ctx = nullptr;
+	Rml::ElementDocument *doc = nullptr;
+	Rml::ElementDocument *overlay = nullptr;   // drawn over the game, menu or not (the FPS)
+	menu_listener listener;
+};
+
+game_menu::game_menu() : m(std::make_unique<impl>()) {}
+
+game_menu::~game_menu()
+{
+	if (m->ctx) {
+		Rml::RemoveContext(m->ctx->GetName());
+		Rml::Shutdown();
+	}
+}
+
+bool game_menu::ready() const { return m->doc != nullptr; }
+
+void game_menu::set_fps(const std::string &text)
+{
+	if (!m->overlay || text == m_fps) return;
+	m_fps = text;
+	if (Rml::Element *e = m->overlay->GetElementById("fps")) e->SetInnerRML(escape(text));
+	if (text.empty()) m->overlay->Hide(); else m->overlay->Show();
+}
+
+void game_menu::set_footer(const std::string &text)
+{
+	if (m->doc)
+		if (Rml::Element *e = m->doc->GetElementById("ver")) e->SetInnerRML(escape(text));
+}
+
+bool game_menu::init(SDL_Window *win, SDL_Renderer *ren, const std::string &assets)
+{
+	m->win = win;
+	m->ren = ren;
+	m->sys = std::make_unique<SystemInterface_SDL>(win);
+	m->gfx = std::make_unique<RenderInterface_SDL>(ren);
+	Rml::SetSystemInterface(m->sys.get());
+	Rml::SetRenderInterface(m->gfx.get());
+	if (!Rml::Initialise()) return false;
+	for (const char *f : { "BarlowCondensed-Medium.ttf", "BarlowCondensed-SemiBold.ttf", "BarlowCondensed-BoldItalic.ttf" })
+		if (!Rml::LoadFontFace(assets + "/fonts/" + f)) return false;
+	int w = 0, h = 0;
+	SDL_GetWindowSizeInPixels(win, &w, &h);
+	m->ctx = Rml::CreateContext("menu", Rml::Vector2i(w, h));
+	if (!m->ctx) return false;
+	m->doc = m->ctx->LoadDocument(assets + "/ui/menu.rml");
+	if (!m->doc) return false;
+	m->overlay = m->ctx->LoadDocument(assets + "/ui/overlay.rml");   // optional
+	m->listener.menu = this;
+	m->doc->AddEventListener(Rml::EventId::Mouseover, &m->listener);
+	m->doc->AddEventListener(Rml::EventId::Click, &m->listener);
+	return true;
+}
+
+void game_menu::open(menu_page root)
+{
+	if (!ready()) return;
+	m_stack = { std::move(root) };
+	m_sel_stack.clear();
+	m_sel = first_selectable(m_stack.back());
+	build();
+	m->doc->Show();
+	m_open = true;
+	SDL_ShowCursor();
+}
+
+void game_menu::close()
+{
+	if (!ready()) return;
+	m_capture = nullptr;
+	m->doc->Hide();
+	m_open = false;
+	m_stack.clear();
+	SDL_HideCursor();
+}
+
+void game_menu::push(menu_page p)
+{
+	m_sel_stack.push_back(m_sel);
+	m_stack.push_back(std::move(p));
+	m_sel = first_selectable(m_stack.back());
+	build();
+}
+
+void game_menu::pop()
+{
+	m_capture = nullptr;
+	if (m_stack.size() <= 1) { close(); return; }
+	m_stack.pop_back();
+	m_sel = m_sel_stack.back();
+	m_sel_stack.pop_back();
+	build();
+}
+
+void game_menu::refresh()
+{
+	if (m_open) build();
+}
+
+void game_menu::build()
+{
+	const menu_page &p = m_stack.back();
+	std::string crumb;
+	for (size_t i = 1; i < m_stack.size(); i++) crumb += (i > 1 ? "  /  " : "") + m_stack[i].name;
+	m->doc->GetElementById("crumb")->SetInnerRML(escape(crumb));
+	std::string rml;
+	for (size_t i = 0; i < p.items.size(); i++) {
+		const menu_item &it = p.items[i];
+		rml += "<div class=\"row" + std::string(it.info ? " info" : "") + (int(i) == m_sel ? " selected" : "") +
+			   "\" id=\"r" + std::to_string(i) + "\"><span class=\"label\">" + escape(it.label) + "</span>";
+		if (it.value) {
+			rml += "<span class=\"value\">";
+			if (it.change) rml += "<span class=\"arrow\">&lt;&nbsp;&nbsp;</span>";
+			rml += escape(it.value());
+			if (it.change) rml += "<span class=\"arrow\">&nbsp;&nbsp;&gt;</span>";
+			rml += "</span>";
+		}
+		rml += "</div>";
+	}
+	m->doc->GetElementById("rows")->SetInnerRML(rml);
+	scroll_to_selected();
+	show_help();
+}
+
+// Long pages scroll inside #rows: keep the selected row in view.
+void game_menu::scroll_to_selected()
+{
+	Rml::Element *rows = m->doc->GetElementById("rows"), *e = m->doc->GetElementById("r" + std::to_string(m_sel));
+	if (!rows || !e) return;
+	m->doc->UpdateDocument();                      // the rows' layout, for their positions
+	const float top = e->GetOffsetTop(), h = e->GetOffsetHeight(), view = rows->GetClientHeight();
+	float st = rows->GetScrollTop();
+	if (top < st) st = top;
+	else if (top + h > st + view) st = top + h - view;
+	rows->SetScrollTop(st);
+}
+
+void game_menu::capture(std::string prompt, std::function<bool(const SDL_Event &)> on_event)
+{
+	m_capture_prompt = std::move(prompt);
+	m_capture = std::move(on_event);
+	show_help();
+}
+
+void game_menu::show_help()
+{
+	if (m_capture) {
+		m->doc->GetElementById("note")->SetInnerRML("<span class=\"key\">" + escape(m_capture_prompt) + "</span>");
+		return;
+	}
+	const menu_page &p = m_stack.back();
+	const std::string &h = m_sel < int(p.items.size()) && !p.items[m_sel].help.empty() ? p.items[m_sel].help : p.note;
+	m->doc->GetElementById("note")->SetInnerRML(escape(h));
+}
+
+void game_menu::select(int i)
+{
+	const menu_page &p = m_stack.back();
+	if (i < 0 || i >= int(p.items.size()) || p.items[i].info || i == m_sel) return;
+	if (auto *old = m->doc->GetElementById("r" + std::to_string(m_sel))) old->SetClass("selected", false);
+	m_sel = i;
+	if (auto *e = m->doc->GetElementById("r" + std::to_string(m_sel))) e->SetClass("selected", true);
+	scroll_to_selected();
+	show_help();
+}
+
+void game_menu::move(int d)
+{
+	const menu_page &p = m_stack.back();
+	const int n = int(p.items.size());
+	int i = m_sel;
+	for (int k = 0; k < n; k++) {
+		i = (i + d + n) % n;
+		if (!p.items[i].info) { select(i); return; }
+	}
+}
+
+void game_menu::change(int d)
+{
+	auto f = m_stack.back().items[m_sel].change;   // a copy: it may rebuild the pages
+	if (!f) return;
+	f(d);
+	refresh();
+}
+
+void game_menu::activate()
+{
+	const menu_item &it = m_stack.back().items[m_sel];
+	if (it.activate) {
+		auto f = it.activate;                     // a copy: it may push, pop or close
+		f();
+		if (m_open) refresh();
+	} else if (it.change)
+		change(+1);
+}
+
+bool game_menu::handle_event(const SDL_Event &e)
+{
+	if (!m_open) return false;
+	if (m_capture) {
+		switch (e.type) {
+		case SDL_EVENT_KEY_DOWN:
+			if (e.key.repeat) return true;
+			if (e.key.scancode == SDL_SCANCODE_ESCAPE) { m_capture = nullptr; build(); return true; }
+			[[fallthrough]];
+		case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+			auto f = m_capture;
+			if (f(e)) { m_capture = nullptr; build(); }
+			return true;
+		}
+		case SDL_EVENT_KEY_UP: case SDL_EVENT_GAMEPAD_BUTTON_UP:
+		case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: case SDL_EVENT_MOUSE_WHEEL:
+			return true;
+		default:
+			break;
+		}
+	}
+	switch (e.type) {
+	case SDL_EVENT_KEY_DOWN:
+		switch (e.key.scancode) {
+		case SDL_SCANCODE_UP: move(-1); break;
+		case SDL_SCANCODE_DOWN: move(+1); break;
+		case SDL_SCANCODE_LEFT: change(-1); break;
+		case SDL_SCANCODE_RIGHT: change(+1); break;
+		case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: case SDL_SCANCODE_SPACE:
+			if (!e.key.repeat) activate();
+			break;
+		case SDL_SCANCODE_ESCAPE: case SDL_SCANCODE_BACKSPACE:
+			if (!e.key.repeat) pop();
+			break;
+		default: break;
+		}
+		return true;
+	case SDL_EVENT_KEY_UP:
+		return true;
+	case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+		switch (e.gbutton.button) {
+		case SDL_GAMEPAD_BUTTON_DPAD_UP: move(-1); break;
+		case SDL_GAMEPAD_BUTTON_DPAD_DOWN: move(+1); break;
+		case SDL_GAMEPAD_BUTTON_DPAD_LEFT: change(-1); break;
+		case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: change(+1); break;
+		case SDL_GAMEPAD_BUTTON_SOUTH: activate(); break;
+		case SDL_GAMEPAD_BUTTON_EAST: pop(); break;
+		case SDL_GAMEPAD_BUTTON_START: case SDL_GAMEPAD_BUTTON_BACK: case SDL_GAMEPAD_BUTTON_GUIDE: close(); break;
+		default: break;
+		}
+		return true;
+	case SDL_EVENT_GAMEPAD_BUTTON_UP:
+		return true;
+	case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+		// the left stick moves like the d-pad, once per push
+		const int dir = e.gaxis.value < -16000 ? -1 : e.gaxis.value > 16000 ? 1 : 0;
+		if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+			if (dir && dir != m_stick_y) move(dir);
+			m_stick_y = dir;
+		} else if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX) {
+			if (dir && dir != m_stick_x) change(dir);
+			m_stick_x = dir;
+		}
+		return true;
+	}
+	case SDL_EVENT_MOUSE_MOTION: {
+		const float d = SDL_GetWindowPixelDensity(m->win);
+		m->ctx->ProcessMouseMove(int(e.motion.x * d), int(e.motion.y * d), 0);
+		return true;
+	}
+	case SDL_EVENT_MOUSE_BUTTON_DOWN:
+		if (e.button.button == SDL_BUTTON_LEFT) m->ctx->ProcessMouseButtonDown(0, 0);
+		else if (e.button.button == SDL_BUTTON_RIGHT) pop();
+		return true;
+	case SDL_EVENT_MOUSE_BUTTON_UP:
+		if (e.button.button == SDL_BUTTON_LEFT) m->ctx->ProcessMouseButtonUp(0, 0);
+		return true;
+	case SDL_EVENT_MOUSE_WHEEL:
+		if (e.wheel.y) move(e.wheel.y > 0 ? -1 : +1);
+		return true;
+	default:
+		return false;
+	}
+}
+
+void game_menu::render()
+{
+	if (!m_open && m_fps.empty()) return;
+	// the menu is laid out in window pixels, not the game's letterboxed picture
+	int lw = 0, lh = 0;
+	SDL_RendererLogicalPresentation mode = SDL_LOGICAL_PRESENTATION_DISABLED;
+	SDL_GetRenderLogicalPresentation(m->ren, &lw, &lh, &mode);
+	SDL_SetRenderLogicalPresentation(m->ren, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+	int w = 0, h = 0;
+	SDL_GetCurrentRenderOutputSize(m->ren, &w, &h);
+	m->ctx->SetDimensions(Rml::Vector2i(w, h));
+	m->ctx->SetDensityIndependentPixelRatio(float(h) / 720.0f);
+	m->ctx->Update();
+	m->gfx->BeginOverlay();
+	m->ctx->Render();
+	m->gfx->EndFrame();
+	SDL_SetRenderLogicalPresentation(m->ren, lw, lh, mode);
+}
