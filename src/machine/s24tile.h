@@ -223,6 +223,9 @@ private:
 	std::vector<uint8_t> flags[4];
 	const uint32_t *m_pens = nullptr;
 	bool m_dirty = true;                        // everything to decode
+public:
+	bool all_to_decode() const { return m_dirty || pix[0].empty(); }
+private:
 	std::vector<uint8_t> m_entry_dirty = std::vector<uint8_t>(0x4000), m_char_dirty = std::vector<uint8_t>(0x4000);
 	bool m_entries_dirty = false, m_chars_dirty = false;
 

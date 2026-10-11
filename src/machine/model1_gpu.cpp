@@ -12,17 +12,24 @@
 // way is drawn whole by the CPU, as before: a 4:3 screen with painted sides (the title, the player
 // select).
 #include "model1.h"
+#include <chrono>
 
-int model1::render_parts(double now, gpu_parts &p)
+uint64_t model1::trace_ns()
+{
+	return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+int model1::render_parts(double now, gpu_parts &p, bool shown)
 {
 	p.ops.clear();
 	p.d3_changed.clear();
 	p.d3_all = false;
 	for (auto &i : p.img) i.px = nullptr;
-	if (!m_smooth || (m_scale == 1 && m_ext == 0)) return render_smooth(now) ? 2 : 0;   // (1x 4:3: the arcade's own)
+	m_last_parts = nullptr;
+	if (!m_smooth || (m_scale == 1 && m_ext == 0)) return render_smooth(now, shown) ? 2 : 0;   // (1x 4:3: the arcade's own)
 	m_parts = &p;
 	m_parts_whole = false;
-	const bool drew = render_smooth(now);
+	const bool drew = render_smooth(now, shown);
 	m_parts = nullptr;
 	if (!drew) return 0;
 	if (m_parts_whole) {
@@ -30,11 +37,28 @@ int model1::render_parts(double now, gpu_parts &p)
 		p.ops.clear();
 		p.d3_changed.clear();
 		m_redrawing = true;
-		render_smooth(now);
+		render_smooth(now, shown);
 		m_redrawing = false;
 		return 2;
 	}
+	m_last_parts = &p;
+	// only looked at (not handed to the GPU): the next picture's 3D goes up whole, as the GPU's copy
+	// hasn't had this one's changes
+	if (!shown) m_bitmap_whole = true;
 	return 1;
+}
+
+// Whether the picture last drawn is black (a curtain): sampled, as drawn whole or in parts.
+bool model1::frame_blank() const
+{
+	const int w = m_bitmap.width(), h = m_bitmap.height();
+	const bool parts = m_frame_parts && m_last_parts;
+	const uint32_t *px = m_bitmap.data();
+	for (size_t i = 0, n = size_t(w) * h; i < n; i += 97) {
+		const uint32_t c = parts ? compose_pixel(*m_last_parts, int(i % w), int(i / w)) : px[i];
+		if (((c >> 16) & 0xff) > 12 || ((c >> 8) & 0xff) > 12 || (c & 0xff) > 12) return false;
+	}
+	return true;
 }
 
 // The 3D's picture: KEY again where the last one drew (all of it after a whole picture), and the
@@ -163,6 +187,7 @@ const bitmap_rgb32 &model1::padded_middle(const bitmap_rgb32 &src, bitmap_rgb32 
 	const uint64_t k = src_gen << 16 | uint64_t(m_ext);   // (m_ext < 65536)
 	if (k == key && out.width() == SCREEN_W + 2 * PAD) return out;
 	key = k;
+	m_work.padded++;
 	out.allocate(SCREEN_W + 2 * PAD, SCREEN_H + 2 * PAD);
 	for (int y = 0; y < SCREEN_H + 2 * PAD; y++) {
 		const uint32_t *s = &src.pix(std::clamp(y - PAD, 0, SCREEN_H - 1), m_ext);
@@ -239,7 +264,10 @@ void model1::parts_layer(int layer, int flags, const bitmap_rgb32 &px, bool stre
 		o.dy = float(-oy - PAD * s);
 		o.dh = float((SCREEN_H + 2 * PAD) * s);
 		if (stretch) {
-			o.sx = PAD + sdx; o.sw = SCREEN_W;
+			// the columns picked as draw_tiles picks them, at the render width (1:1 across)
+			const bitmap_rgb32 &st = stretched(l4, m, 0, SCREEN_H + 2 * PAD, sdx, true, l4 ? m_l4m_gen : m_l6m_gen);
+			p.img[idm] = { &st.pix(0), st.width(), st.height(), size_t(st.width()), m_stretched_gen[l4] };
+			o.sw = float(out_w);
 			o.dw = float(out_w);
 		} else {
 			o.sw = float(SCREEN_W + 2 * PAD);
@@ -253,11 +281,41 @@ void model1::parts_layer(int layer, int flags, const bitmap_rgb32 &px, bool stre
 		o.tex = id;
 		o.sh = SCREEN_H;
 		o.dh = float(SCREEN_H * s);
-		if (stretch) { o.sx = float(m_ext); o.sw = SCREEN_W; }   // the 4:3 layer across the width
-		else o.sw = float(tw);
+		if (stretch) {                                // the 4:3 layer across the width, as above
+			const bitmap_rgb32 &st = stretched(l4, px, 0, SCREEN_H, 0, false, p.img[id].gen);
+			p.img[id] = { &st.pix(0), st.width(), st.height(), size_t(st.width()), m_stretched_gen[l4] };
+			o.sw = float(out_w);
+		} else o.sw = float(tw);
 		o.dw = float(out_w);
 	}
 	p.ops.push_back(o);
+}
+
+// A backdrop's columns across the render width, picked as draw_tiles does: moved by smooth motion,
+// from the padded middle (clamped to it); else from the layer's 4:3 middle.
+const bitmap_rgb32 &model1::stretched(int i, const bitmap_rgb32 &src, int y0, int rows, float sdx, bool moved, uint64_t src_gen)
+{
+	const int out_w = (SCREEN_W + 2 * m_ext) * m_scale;
+	uint32_t sbits;
+	memcpy(&sbits, &sdx, 4);
+	const uint64_t key = (src_gen * 1000003u + uint64_t(out_w)) * 0x9e3779b97f4a7c15ull ^ (uint64_t(sbits) << 1 | uint64_t(moved));
+	bitmap_rgb32 &out = m_stretched[i];
+	if (key == m_stretched_key[i] && out.width() == out_w && out.height() == rows) return out;
+	m_stretched_key[i] = key;
+	m_stretched_gen[i]++;
+	out.allocate(out_w, rows);
+	std::vector<int> col(out_w);
+	for (int X = 0; X < out_w; X++)
+		col[X] = moved ? PAD + std::clamp(int(std::floor((X + 0.5f) * SCREEN_W / out_w + sdx)), 0, SCREEN_W - 1)
+					   : m_ext + int((X + 0.5f) * SCREEN_W / out_w);
+	parallel_rows(rows, [&](int a, int b) {
+		for (int y = a; y < b; y++) {
+			const uint32_t *s = &src.pix(y0 + y);
+			uint32_t *d = &out.pix(y);
+			for (int X = 0; X < out_w; X++) d[X] = s[col[X]];
+		}
+	});
+	return out;
 }
 
 // A hi-res sky's rows (draw_sky's, as copies of the panorama at the render scale): the rows where

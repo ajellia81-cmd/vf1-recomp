@@ -79,7 +79,6 @@ main{--s:1; position:relative; z-index:1; width:100%; min-width:0; margin-block:
 .name{font-weight:800; letter-spacing:-.03em; line-height:1.04; text-wrap:balance; font-size:clamp(2.1rem,5.6vw,3.3rem);
   margin-top:calc(-130px * var(--s)); position:relative; z-index:4; animation:riseIn .7s cubic-bezier(.2,.7,.3,1) .45s backwards}
 .ver{position:relative; z-index:4; color:var(--dim); font-size:.85rem; margin-top:.45rem; animation:fadeIn 1s ease .6s backwards}
-.dlnote{position:relative; z-index:4; max-width:34rem; margin:.7rem auto 0; padding:0 1rem; color:var(--dim); font-size:.78rem; line-height:1.45; animation:fadeIn 1s ease .6s backwards}
 .cta{position:relative; z-index:5; margin-top:1.3rem; display:flex; gap:.7rem; justify-content:center; flex-wrap:wrap;
   animation:riseIn .7s cubic-bezier(.2,.7,.3,1) .55s backwards}
 .get{display:inline-flex; align-items:center; gap:.55rem; font-weight:700; font-size:1.02rem; text-decoration:none;
@@ -288,11 +287,10 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
   <p class="ver">Recomp %VERSION% &middot; %DATE%</p>
 
   <div class="cta" id="cta">
-    <a class="get alt" data-os="win" href="downloads/%WIN_FILE%" download><svg class="os" viewBox="0 0 24 24" aria-hidden="true"><path d="M0 3.449 9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/></svg>Windows</a>
-    <a class="get alt" data-os="mac" href="downloads/%MAC_FILE%" download><svg class="os" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>Mac</a>
-    <a class="get alt" data-os="deck" href="downloads/%DECK_FILE%" download><svg class="os" viewBox="0 0 24 24" aria-hidden="true"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z"/></svg>Steam Deck</a>
+    <a class="get alt" data-os="win" href="%WIN_URL%"><svg class="os" viewBox="0 0 24 24" aria-hidden="true"><path d="M0 3.449 9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/></svg>Windows</a>
+    <a class="get alt" data-os="mac" href="%MAC_URL%"><svg class="os" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>Mac</a>
+    <a class="get alt" data-os="deck" href="%DECK_URL%"><svg class="os" viewBox="0 0 24 24" aria-hidden="true"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z"/></svg>Linux / Steam Deck</a>
   </div>
-  <p class="dlnote">New builds aren't signed, so Chrome may block the download at first: open Chrome's Downloads list, click the file and choose to download it anyway.</p>
 
   <nav class="more" aria-label="More about it">
     <span class="info"><button class="lnk" id="watch"><svg class="ico" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg>Watch</button></span>
@@ -362,13 +360,22 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
       </div></span>
     <span class="info"><button class="lnk" aria-expanded="false">Changelog</button>
       <div class="pop" role="dialog" aria-label="Changelog">
-        <p><b>v1.1.7</b> &middot; Oct 10 2026</p>
+        <p><b>v1.1.8</b> &middot; Oct 12 2026</p>
         <ul>
+          <li>Scene changes are smooth: no more slowdown or pause when a match starts, at a KO, a replay, the win pose or a camera cut, and KO slow motion no longer shows a picture twice.</li>
+          <li>After a slow moment the game carries on instead of racing to catch up, and the automatic quality drop no longer mistakes scene changes for a slow computer.</li>
+          <li>New antialiasing setting, <b>Low</b>: smooths the 3D's edges for a fraction of the cost of 2x.</li>
+          <li>The intro's fly-around sky glides instead of stepping, and lighting on the polygons changes smoothly between frames.</li>
+          <li>Faster title and player select screens, and stage skies prepared in the background at high render scales.</li>
+          <li>Scanlines and CRT are even at any screen size (no more banding on the Steam Deck).</li>
+          <li>The FPS counter no longer dips at scene changes.</li>
+        </ul>
+        <details><summary>v1.1.7</summary><ul>
           <li>Smooth motion is now really smooth on 120 Hz and other high refresh rate screens: every picture shows its own moment, where before many repeated the one before.</li>
           <li>The sky moves smoothly with the camera instead of a pixel at a time.</li>
           <li>Changing a display setting while paused no longer shows a different moment of the game (after a camera cut or during a scene change).</li>
           <li>Faster drawing: about a third less time per picture at 2x to 4x render scale, with the same picture. The graphics card now puts it together; if yours can't do it exactly, the game notices at startup and draws it as before.</li>
-        </ul>
+        </ul></details>
         <details><summary>v1.1.6</summary><ul>
           <li>Arcade settings in the menu: difficulty, ring size, rounds to win (against the computer and between players), continues, demo sound and the service menu. Changing them restarts the game, as on the cabinet.</li>
           <li>Ring size can now be set apart from the difficulty: Small, Medium, Large or Extra large. On the arcade it always follows the difficulty.</li>
@@ -409,6 +416,7 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
           <li>First release.</li>
         </ul></details>
       </div></span>
+    <span class="info"><a class="lnk" href="https://github.com/mr-finster/vf1-recomp" target="_blank" rel="noopener">GitHub</a></span>
     <span class="info"><a class="lnk" id="support" href="https://buymeacoffee.com/mrfinster" target="_blank" rel="noopener">Support me</a></span>
   </nav>
 
@@ -483,7 +491,7 @@ const vid = document.getElementById('vid'), yt = document.getElementById('yt');
 function watch(){
   vid.showModal(); clip.pause();
   const f = document.createElement('iframe');
-  f.src = 'https://www.youtube-nocookie.com/embed/PR1Yw45lcto?autoplay=1&rel=0&playsinline=1';
+  f.src = 'https://www.youtube-nocookie.com/embed/mHrTyikhkyg?autoplay=1&rel=0&playsinline=1';
   f.title = 'Virtua Fighter Recomp';
   f.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
   f.allowFullscreen = true;

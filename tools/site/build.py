@@ -102,9 +102,12 @@ def main():
         if not carries(src, args.version):
             raise SystemExit(f'{os.path.relpath(src, ROOT)} is not the {args.version} build (rebuild it from the tag)')
     mac, deck, win = 'VirtuaFighterRecomp-mac.zip', 'VirtuaFighterRecomp-deck.tar.gz', 'VirtuaFighterRecomp-windows.zip'
-    shutil.copyfile(mac_src, os.path.join(dl, mac))
-    shutil.copyfile(deck_src, os.path.join(dl, deck))
-    shutil.copyfile(win_src, os.path.join(dl, win))
+    # The files themselves are on GitHub, attached to the release (mr-finster/vf1-recomp): the buttons link to the
+    # latest release's, and the old /downloads/ links on this site send there too. The checks above still make sure
+    # the packages built here, the ones to attach, are this version's.
+    shutil.rmtree(dl)
+    gh = 'https://github.com/mr-finster/vf1-recomp/releases/latest/download/'
+    open(os.path.join(OUT, '_redirects'), 'w').write(''.join(f'/downloads/{f} {gh}{f} 302\n' for f in (mac, deck, win)))
 
     # the marquee (the app icon's letters, drawn wide) and the page icons
     img = os.path.join(OUT, 'img')
@@ -120,6 +123,7 @@ def main():
         '%SITE_URL%': args.url.rstrip('/'),
         '%VERSION%': args.version,
         '%DATE%': f'{today:%b} {today.day} {today.year}',
+        '%MAC_URL%': gh + mac, '%DECK_URL%': gh + deck, '%WIN_URL%': gh + win,
         '%MAC_FILE%': mac, '%MAC_SIZE%': size(mac_src),
         '%DECK_FILE%': deck, '%DECK_SIZE%': size(deck_src),
         '%WIN_FILE%': win, '%WIN_SIZE%': size(win_src),

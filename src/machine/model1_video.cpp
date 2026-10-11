@@ -1141,6 +1141,7 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 		point_t *p1 = m_pointpt++;
 
 		glm::vec3 vn(poly_data[poly_adr + 1], poly_data[poly_adr + 2], poly_data[poly_adr + 3]);
+		const glm::vec3 vn_model = vn;
 		p0->x = poly_data[poly_adr + 4];
 		p0->y = poly_data[poly_adr + 5];
 		p0->z = poly_data[poly_adr + 6];
@@ -1235,10 +1236,27 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 			cquad.col = scale_color(m_pens[0x1000 | (m_tgp_ram[tex_adr - 0x40000] & 0x3ff)], MIN(1.0, ln));
 #endif
 
-			float dif = glm::dot(vn, m_view->light);
-			float spec = compute_specular(vn, m_view->light, dif, lightmode);
-			float ln = m_view->lightparams[lightmode].a + m_view->lightparams[lightmode].d * std::max(0.0f, dif) + spec;
-			int lumval = 255.0f * std::min(1.0f, ln);
+			// the shade: from the normal turned by the object's matrix and the light
+			auto lum_of = [&](glm::vec3 n, glm::vec3 light) {
+				float dif = glm::dot(n, light);
+				float spec = compute_specular(n, light, dif, lightmode);
+				float ln = m_view->lightparams[lightmode].a + m_view->lightparams[lightmode].d * std::max(0.0f, dif) + spec;
+				return int(255.0f * std::min(1.0f, ln));
+			};
+			int lumval = lum_of(vn, m_view->light);
+			// Smooth motion, an object blended between two frames: its shade too. Lit as at each frame
+			// (that frame's matrix and light) and the two colours mixed, so a turning model's shades
+			// glide instead of stepping from one frame's to the next's partway, exact at each frame.
+			int lum_from = -1, lum_to = -1;
+			if (m_shade_from && m_alpha < 1) {
+				auto turned = [&](const float *t) {
+					const glm::vec3 r1(t[0], t[3], t[6]), r2(t[1], t[4], t[7]), r3(t[2], t[5], t[8]);
+					return glm::normalize(glm::vec3(glm::dot(vn_model, r1), glm::dot(vn_model, r2), glm::dot(vn_model, r3)));
+				};
+				const glm::vec3 light_from = m_shade_light[3] > 0 ? glm::vec3(m_shade_light[0], m_shade_light[1], m_shade_light[2]) : m_view->light;
+				lum_from = lum_of(turned(m_shade_from), light_from);
+				lum_to = lum_of(turned(m_shade_to), m_view->light);
+			}
 			// bits [11:10] of the tile word select a colour mode: bit 10 marks a
 			// flat UI element (radar blips, HUD text) drawn unlit, and mode 01
 			// additionally blinks by rotating the BGR channels on alternate frames.
@@ -1256,20 +1274,32 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 				g = tmp;
 			}
 
-			lumval >>= 2; //there must be a luma translation table somewhere
-			if (lumval > 0x3f)
-				lumval = 0x3f;
-			else if (lumval < 0)
-				lumval = 0;
+			auto colour_of = [&](int lum) {
+				lum >>= 2; //there must be a luma translation table somewhere
+				if (lum > 0x3f)
+					lum = 0x3f;
+				else if (lum < 0)
+					lum = 0;
 
-			// flat UI element: draw unlit at full intensity instead of shading it
-			if (tex_data & 0x400)
-				lumval = 0x3f;
+				// flat UI element: draw unlit at full intensity instead of shading it
+				if (tex_data & 0x400)
+					lum = 0x3f;
 
-			r = (m_color_xlat[(r << 8) | lumval | 0x0] >> 3) & 0x1f;
-			g = (m_color_xlat[(g << 8) | lumval | 0x2000] >> 3) & 0x1f;
-			b = (m_color_xlat[(b << 8) | lumval | 0x4000] >> 3) & 0x1f;
-			cquad.col = (pal5bit(r) << 16) | (pal5bit(g) << 8) | (pal5bit(b) << 0);
+				const int rr = (m_color_xlat[(r << 8) | lum | 0x0] >> 3) & 0x1f;
+				const int gg = (m_color_xlat[(g << 8) | lum | 0x2000] >> 3) & 0x1f;
+				const int bb = (m_color_xlat[(b << 8) | lum | 0x4000] >> 3) & 0x1f;
+				return uint32_t(pal5bit(rr) << 16) | (pal5bit(gg) << 8) | (pal5bit(bb) << 0);
+			};
+			if (lum_from >= 0) {
+				const uint32_t c0 = colour_of(lum_from), c1 = colour_of(lum_to);
+				uint32_t c = 0;
+				for (int sh = 0; sh <= 16; sh += 8) {
+					const float v0 = float((c0 >> sh) & 0xff), v1 = float((c1 >> sh) & 0xff);
+					c |= uint32_t(std::lround(v0 + (v1 - v0) * m_alpha)) << sh;
+				}
+				cquad.col = c;
+			} else
+				cquad.col = colour_of(lumval);
 		}
 
 		if (flags & 0x00002000)
@@ -1700,6 +1730,7 @@ void model1::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, render_
 						m_view->set_translation_matrix(blended);
 						push_object(readi(list_offset + 2), readi(list_offset + 4), readi(list_offset + 6), old_z);
 						m_view->set_translation_matrix(current);
+						m_shade_from = m_shade_to = m_shade_light = nullptr;
 					} else
 						push_object(readi(list_offset + 2), readi(list_offset + 4), readi(list_offset + 6), old_z);
 				}

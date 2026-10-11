@@ -5,6 +5,10 @@
 // with the same object's in the list before, and the sky's scroll likewise. The game itself runs
 // untouched; the picture is one game frame (two video frames) behind it.
 #include "model1.h"
+#include <glm/geometric.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 
 namespace {
 
@@ -17,7 +21,7 @@ void model1::set_smooth(bool on)
 {
 	if (on == m_smooth) return;
 	m_smooth = on;
-	m_logic[0] = m_logic[1] = logic_frame{};
+	m_logic[0] = m_logic[1] = m_logic_prev = logic_frame{};
 	m_shown = false;
 }
 
@@ -31,6 +35,8 @@ void model1::index_objects(logic_frame &lf)
 	auto rdi = [&](int a) { return uint32_t(l[a & 0x7fff] | l[(a + 1) & 0x7fff] << 16); };
 	auto rdf = [&](int a) { uint32_t v = rdi(a); float f; memcpy(&f, &v, 4); return f; };
 	int off = 0;
+	float light[3] = { 0, 0, 0 };
+	bool has_light = false;
 	for (int guard = 0; guard < 0x10000; guard++) {
 		switch (rdi(off)) {
 		case 0: off += 2; break;
@@ -54,10 +60,19 @@ void model1::index_objects(logic_frame &lf)
 		case 5: case 6: off += 6 + rdi(off + 4) * 2; break;
 		case 7: case 8: off += 4; break;
 		case 9: case 0xc: off += 6; break;
-		case 0xa: off += 8; break;
+		case 0xa:                                  // the light vector, as set_light_direction keeps it
+			{
+				const glm::vec3 v = glm::normalize(glm::vec3(rdf(off + 2), rdf(off + 4), rdf(off + 6)));
+				light[0] = v.x; light[1] = v.y; light[2] = v.z;
+				has_light = true;
+			}
+			off += 8;
+			break;
 		case 0xb: {
 			slot sl;
 			for (int i = 0; i < 12; i++) sl.mat[i] = rdf(off + 2 + 2 * i);
+			memcpy(sl.light, light, sizeof light);
+			sl.has_light = has_light;
 			lf.slots.push_back(sl);
 			off += 26;
 			break;
@@ -89,6 +104,7 @@ void model1::record_frame()
 		objects = lf.objects;
 		static const bool log = getenv("VF_LOG_SMOOTH") != nullptr;
 		if (lf.hash != m_logic[1].hash) {
+			m_logic_prev = std::move(m_logic[0]);
 			m_logic[0] = std::move(m_logic[1]);
 			m_logic[1] = std::move(lf);
 		}
@@ -97,6 +113,7 @@ void model1::record_frame()
 	const uint16_t h = m_tiles.tile_r(0x5002), v = m_tiles.tile_r(0x5006);
 	sky_sample &sm = m_sky_hist[m_frame % SKY_HIST];
 	sm = { int(m_frame), h, v, float(h & 0x1ff) + m_sky_frac_h, float(v & 0x3ff) + m_sky_frac_v };
+	sky_settled(sm.lands_h, sm.lands_v);
 	// and the next frame's, when the game's routine wrote this one: it runs again at the next vblank
 	// from what is in its RAM now (the game moves the camera just after the routine, not before)
 	if (m_sky_written == m_frame && m_sky_read_h && m_sky_read_v) {
@@ -109,25 +126,22 @@ void model1::record_frame()
 	m_last_quads = objects;
 	if (objects == 0) {
 		// nothing in 3D (a curtain, a 2D screen): the next scene starts afresh, not blended from this
-		m_logic[0] = m_logic[1] = logic_frame{};
-		screen_update(m_bitmap, m_bitmap.cliprect());
-		m_unshown = true;
+		m_logic[0] = m_logic[1] = m_logic_prev = logic_frame{};
+		// (when the host puts pictures together on the GPU: drawn in parts, so the 2D screens and
+		// curtains don't cost a whole picture drawn at the render scale and uploaded every frame)
+		if (m_parts_mode) render_parts(double(m_frame), m_own_parts, false);
+		else {
+			screen_update(m_bitmap, m_bitmap.cliprect());
+			m_unshown = true;
+			m_frame_parts = false;
+		}
 	}
-}
-
-// Whether the sky's scroll jumped in the newest frame (more than a pan moves it).
-bool model1::sky_settling() const
-{
-	const int f = int(m_frame) - 1;
-	const sky_sample &a = m_sky_hist[f % SKY_HIST], &b = m_sky_hist[(f - 1 + SKY_HIST) % SKY_HIST];
-	if (a.frame != f || b.frame != f - 1) return false;
-	const int dh = ((a.h - b.h + 256) & 511) - 256, dv = ((a.v - b.v + 512) & 1023) - 512;
-	return std::abs(dh) > 8 || std::abs(dv) > 8;
 }
 
 void model1::smooth_cut()
 {
 	m_logic[0] = m_logic[1];
+	m_logic_prev = logic_frame{};
 }
 
 // The picture for a moment `now`, in frames (the newest frame's number plus how far into it).
@@ -137,30 +151,67 @@ bool model1::render_smooth(double now, bool shown)
 	// what redraw() needs to draw it again: the moment and the frame it's drawn in
 	auto drawn = [&] {
 		m_unshown = !shown || m_parts;                  // (in parts: frame() holds only the 3D)
+		m_frame_parts = m_parts != nullptr;
 		if (shown) { m_shown = true; m_shown_now = now; m_shown_frame = m_frame; }
 	};
 	if (m_logic[1].list.empty()) { screen_update(m_bitmap, m_bitmap.cliprect()); drawn(); return true; }
 	const logic_frame &a = m_logic[0], &b = m_logic[1];
 	double alpha = 1;
 	if (!a.list.empty() && b.frame > a.frame) {
-		const double span = b.frame - a.frame;
-		alpha = std::clamp((now - span - a.frame) / span, 0.0, 1.0);
+		// the picture is a span behind (the newer list is in hand when the older one's moment has
+		// passed), and never less than a game frame: two lists a frame apart (a scene's first, as it
+		// is built) went at a frame behind, and the picture stood still a frame when the next list
+		// came two later
+		const double span = b.frame - a.frame, behind = std::max(span, 2.0);
+		alpha = std::clamp((now - behind - a.frame) / span, 0.0, 1.0);
 	}
 	m_alpha = float(alpha);
+	if (!m_redrawing) m_last_alpha = m_alpha;
 	m_replaying = true;
 	m_smooth_stats[0] = m_smooth_stats[1] = m_smooth_stats[2] = 0;
-	blend_slots();
-	// A cut can't be blended: the older picture stays until the newer one's moment (as the
-	// blend would), so the cut lands when the game's sky, written two frames later, changes too.
-	m_replay_older = m_blend_cut && alpha < 1;
-	if (m_blend_cut && b.frame != m_cut_frame) m_cut_frame = b.frame;
-	// After a cut the game moves the sky into place over a few frames: until it has stopped
-	// jumping (at most 4 frames), the picture before the cut stays.
-	// (redraw() draws a picture that was shown: never one held back)
-	if (!m_redrawing && !m_replay_older && m_cut_frame >= 0 && now < m_cut_frame + 2 + 4 && sky_settling()) {
-		m_replaying = false;
-		m_alpha = 1;
-		return false;
+	blend_slots(a, b, alpha);
+	// A cut can't be blended: the older view stays until the newer one's moment (as the blend
+	// would), so the cut lands when the game's sky, written two frames later, changes too. It
+	// stood still meanwhile, a game frame (4 refreshes at 120 Hz) at every camera cut; now it
+	// carries on from the list before it as it was moving and eases to a stop at the cut, half
+	// a game frame's move on at most (straight on, a fast camera swung into views the game never
+	// showed).
+	const bool cut = m_blend_cut;
+	m_replay_older = cut && alpha < 1;
+	m_replay_extra = false;
+	if (m_replay_older && !m_logic_prev.list.empty() && b.frame - a.frame == a.frame - m_logic_prev.frame) {
+		blend_slots(m_logic_prev, a, 1 + 0.5 * (1 - (1 - alpha) * (1 - alpha)));
+		m_replay_extra = !m_blend_cut;
+	}
+	m_blend_cut = cut;
+	if (cut && b.frame != m_cut_frame) m_cut_frame = b.frame;
+	// After a cut the game moves the sky into place over a few frames (at most 4): the picture
+	// before the cut used to stay until it stopped jumping, a picture held for 2-7 refreshes at
+	// every replay's camera cut; now the new view shows at once, its sky where it settles
+	// (smooth_sky_shift).
+	// (the camera's RAM has the new view from the cut's frame on; the scroll the game writes
+	// follows it a frame later, mixed with the old view's, and lands one or two frames after that)
+	m_sky_settling_now = false;
+	if (!m_replay_older && m_cut_frame >= 0 && int(m_frame) - 1 <= m_cut_frame + 4) {
+		const sky_sample &cur = m_sky_hist[(m_frame - 1) % SKY_HIST];
+		m_sky_settling_now = cur.frame == int(m_frame) - 1 && (cur.lands_h != cur.h || cur.lands_v != cur.v);
+		// (the tile layer moves 24 pixels at most: further, the picture before the cut stays a frame)
+		if (m_sky_settling_now && !m_redrawing && !sky_reaches(cur)) { m_replaying = false; m_alpha = 1; return false; }
+	}
+	if (!m_redrawing) {
+		// testing: where the 3D is in this picture, on average (the trace's check that each picture
+		// lies between its neighbours: a picture blended from the wrong pair stands out)
+		const logic_frame &l = m_replay_older ? a : b;
+		const bool own = !m_replay_older || m_replay_extra;
+		double sum[3] = { 0, 0, 0 };
+		int n = 0;
+		for (size_t i = 0; i < l.slots.size(); i++) {
+			if (l.slots[i].polys.empty()) continue;
+			const float *mt = own && i < m_blend_ok.size() && m_blend_ok[i] ? m_blend[i].data() : l.slots[i].mat;
+			for (int k = 0; k < 3; k++) sum[k] += mt[9 + k];
+			n++;
+		}
+		for (int k = 0; k < 3; k++) m_pic_place[k] = n ? float(sum[k] / n) : 0;
 	}
 	const auto render_done = m_render_done;     // emulation state: drawing again mustn't touch it
 	const int quads = m_last_quads;
@@ -169,6 +220,7 @@ bool model1::render_smooth(double now, bool shown)
 	m_last_quads = quads;
 	m_replaying = false;
 	m_replay_older = false;
+	m_replay_extra = false;
 	drawn();
 	static const bool log = getenv("VF_LOG_SMOOTH") != nullptr;
 	if (log && alpha < 1)
@@ -187,6 +239,7 @@ void model1::keep_still()
 	s.frame = m_frame;
 	s.logic[0] = m_logic[0];
 	s.logic[1] = m_logic[1];
+	s.logic_prev = m_logic_prev;
 	s.cut_frame = m_cut_frame;
 	std::copy(std::begin(m_sky_hist), std::end(m_sky_hist), s.sky_hist);
 	s.tile_ram = m_tiles.tile_ram;
@@ -213,6 +266,7 @@ void model1::swap_still()
 	std::swap(m_frame, s.frame);
 	std::swap(m_logic[0], s.logic[0]);
 	std::swap(m_logic[1], s.logic[1]);
+	std::swap(m_logic_prev, s.logic_prev);
 	std::swap(m_cut_frame, s.cut_frame);
 	std::swap_ranges(std::begin(m_sky_hist), std::end(m_sky_hist), s.sky_hist);
 	m_tiles.swap_rams(s.tile_ram, s.char_ram);
@@ -234,21 +288,148 @@ void model1::swap_still()
 // The blended matrix of every slot in the newer list. Slots pair by position when the two lists
 // have the same shape (most of a fight), else by the first object drawn in them. A picture where
 // many slots jump is a camera cut: nothing is blended, so parts never come apart.
-void model1::blend_slots()
+// The camera's move between two frames, fitted to the paired slots' places (rigid: a turn and a
+// shift, least squares, the slots that don't follow it dropped and fitted again). A paired slot far
+// off it (over 2% of its depth: paired with another copy of its model) is paired instead with the
+// copy that follows the move, when one does; one that none follows, of a model with three or more
+// copies in the frame (scenery, not a fighter's part, which moves by itself), is marked -2: drawn
+// where the newer frame has it. VF2's (model2_smooth.cpp), here only for runs of copies that
+// changed length. The number paired again.
+int model1::repair_by_camera(const logic_frame &a, const logic_frame &b, std::vector<int> &pair, const std::vector<char> &changed_run)
 {
-	const logic_frame &a = m_logic[0], &b = m_logic[1];
+	struct pt { double x, y, z; };
+	auto first = [](const slot &sl) { return sl.polys.empty() ? 0u : sl.polys[0]; };
+	std::vector<pt> P, Q;
+	std::vector<int> K;
+	for (size_t k = 0; k < pair.size(); k++) {
+		const int q = pair[k];
+		if (q < 0 || b.slots[k].polys.empty()) continue;
+		const float *pa = a.slots[q].mat, *pb = b.slots[k].mat;
+		P.push_back({ pa[9], pa[10], pa[11] });
+		Q.push_back({ pb[9], pb[10], pb[11] });
+		K.push_back(int(k));
+	}
+	if (P.size() < 8) return 0;
+	double R[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } }, T[3] = {};
+	std::vector<char> use(P.size(), 1);
+	auto residual = [&](const pt &p, const pt &q) {
+		double o[3];
+		for (int r = 0; r < 3; r++) o[r] = R[r][0] * p.x + R[r][1] * p.y + R[r][2] * p.z + T[r];
+		const double dx = o[0] - q.x, dy = o[1] - q.y, dz = o[2] - q.z;
+		return std::sqrt(dx * dx + dy * dy + dz * dz) / std::max({ std::fabs(p.z), std::fabs(q.z), 1.0 });
+	};
+	std::vector<double> res(P.size());
+	for (int pass = 0; pass < 3; pass++) {
+		// the best turn for the slots in use: the orthonormal part of their covariance (Newton's
+		// iteration for the polar decomposition), then the shift between the centres
+		double cp[3] = {}, cq[3] = {}, H[3][3] = {};
+		int n = 0;
+		for (size_t i = 0; i < P.size(); i++)
+			if (use[i]) { cp[0] += P[i].x; cp[1] += P[i].y; cp[2] += P[i].z; cq[0] += Q[i].x; cq[1] += Q[i].y; cq[2] += Q[i].z; n++; }
+		if (n < 4) return 0;
+		for (int r = 0; r < 3; r++) cp[r] /= n, cq[r] /= n;
+		for (size_t i = 0; i < P.size(); i++)
+			if (use[i]) {
+				const double p[3] = { P[i].x - cp[0], P[i].y - cp[1], P[i].z - cp[2] }, q[3] = { Q[i].x - cq[0], Q[i].y - cq[1], Q[i].z - cq[2] };
+				for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) H[r][c] += q[r] * p[c];
+			}
+		double M[3][3];
+		memcpy(M, H, sizeof M);
+		for (int it = 0; it < 30; it++) {
+			const double det = M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+			if (std::fabs(det) < 1e-30) return 0;
+			double C[3][3];   // the inverse's transpose: cofactors / det
+			C[0][0] = (M[1][1] * M[2][2] - M[1][2] * M[2][1]) / det; C[0][1] = (M[1][2] * M[2][0] - M[1][0] * M[2][2]) / det; C[0][2] = (M[1][0] * M[2][1] - M[1][1] * M[2][0]) / det;
+			C[1][0] = (M[0][2] * M[2][1] - M[0][1] * M[2][2]) / det; C[1][1] = (M[0][0] * M[2][2] - M[0][2] * M[2][0]) / det; C[1][2] = (M[0][1] * M[2][0] - M[0][0] * M[2][1]) / det;
+			C[2][0] = (M[0][1] * M[1][2] - M[0][2] * M[1][1]) / det; C[2][1] = (M[0][2] * M[1][0] - M[0][0] * M[1][2]) / det; C[2][2] = (M[0][0] * M[1][1] - M[0][1] * M[1][0]) / det;
+			for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) M[r][c] = 0.5 * (M[r][c] + C[r][c]);
+		}
+		memcpy(R, M, sizeof R);
+		for (int r = 0; r < 3; r++) T[r] = cq[r] - (R[r][0] * cp[0] + R[r][1] * cp[1] + R[r][2] * cp[2]);
+		std::vector<double> sorted;
+		for (size_t i = 0; i < P.size(); i++) sorted.push_back(res[i] = residual(P[i], Q[i]));
+		std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+		const double med = sorted[sorted.size() / 2];
+		for (size_t i = 0; i < P.size(); i++) use[i] = res[i] <= std::max(3 * med, 0.002);
+	}
+	int repaired = 0;
+	for (size_t i = 0; i < P.size(); i++) {
+		const int k = K[i];
+		// (only in a run of copies that changed length: VF1's fighters have parts in threes and
+		// sixes, a hand's fingers, which move by themselves and pair right in order)
+		if (res[i] <= 0.02 || !changed_run[k]) continue;
+		const uint32_t f = first(b.slots[k]);
+		int best = -1;
+		double bres = std::min(res[i] * 0.25, 0.01);
+		for (size_t q = 0; q < a.slots.size(); q++)
+			if (first(a.slots[q]) == f && int(q) != pair[k]) {
+				const float *pa = a.slots[q].mat;
+				const double r = residual({ pa[9], pa[10], pa[11] }, Q[i]);
+				if (r < bres) bres = r, best = int(q);
+			}
+		if (best >= 0) pair[k] = best, repaired++;
+		else if (res[i] > 0.06) {
+			int same = 0;
+			for (const auto &o : b.slots) same += first(o) == f;
+			if (same >= 3) pair[k] = -2, repaired++;
+		}
+	}
+	return repaired;
+}
+
+void model1::blend_slots(const logic_frame &a, const logic_frame &b, double alpha)
+{
 	m_blend.assign(b.slots.size(), {});
 	m_blend_ok.assign(b.slots.size(), 0);
+	m_blend_from.assign(b.slots.size(), {});
+	m_blend_to.assign(b.slots.size(), {});
+	m_blend_light.assign(b.slots.size(), {});
 	m_blend_cut = false;
-	if (m_alpha >= 1 || a.slots.empty()) return;
+	if (alpha >= 1 && !m_replay_older) return;
+	if (a.slots.empty()) return;
 	// pair the slots in order, like a diff: the same first model pairs; a different model in the
 	// same place (a hand, a face swapped) pairs too; slots that appeared or went are skipped
 	std::vector<int> pair(b.slots.size(), -1);
 	auto first = [](const slot &sl) { return sl.polys.empty() ? 0u : sl.polys[0]; };
 	size_t i = 0, j = 0;
 	const size_t na = a.slots.size(), nb = b.slots.size();
+	auto dist = [&](size_t ia, size_t jb) {
+		const float *pa = a.slots[ia].mat, *pb = b.slots[jb].mat;
+		return double(pb[9] - pa[9]) * (pb[9] - pa[9]) + double(pb[10] - pa[10]) * (pb[10] - pa[10]) + double(pb[11] - pa[11]) * (pb[11] - pa[11]);
+	};
+	int repaired = 0;
+	std::vector<char> changed_run(nb, 0);       // slots of a run that changed length
 	while (i < na && j < nb) {
-		if (first(a.slots[i]) == first(b.slots[j])) { pair[j++] = int(i++); continue; }
+		if (first(a.slots[i]) == first(b.slots[j])) {
+			// A run of slots of one model (copies of a piece of scenery): when one of them came or
+			// went, pairing in order pairs a copy with the next one along, and the pictures between
+			// the frames draw it halfway to that one's place. The shorter run is paired where it
+			// lies nearest in the longer one; runs of the same length pair in order. (VF2's fix
+			// for its stages' bushes; as there, the rest pair by the diff.)
+			const uint32_t f = first(a.slots[i]);
+			size_t ra = 1, rb = 1;
+			if (f) {
+				while (i + ra < na && first(a.slots[i + ra]) == f) ra++;
+				while (j + rb < nb && first(b.slots[j + rb]) == f) rb++;
+			}
+			if (ra == rb) { for (size_t k = 0; k < ra; k++) pair[j + k] = int(i + k); i += ra; j += rb; continue; }
+			for (size_t k = 0; k < rb; k++) changed_run[j + k] = 1;
+			const size_t n = std::min(ra, rb), slack = std::max(ra, rb) - n;
+			size_t best = 0;
+			double best_d = -1;
+			for (size_t o = 0; o <= slack && o <= 64; o++) {
+				double d = 0;
+				for (size_t k = 0; k < n; k++) d += ra > rb ? dist(i + o + k, j + k) : dist(i + k, j + o + k);
+				if (best_d < 0 || d < best_d) best_d = d, best = o;
+			}
+			for (size_t k = 0; k < n; k++) {
+				if (ra > rb) pair[j + k] = int(i + best + k);
+				else pair[j + best + k] = int(i + k);
+			}
+			if (best) repaired += int(n);
+			i += ra; j += rb;
+			continue;
+		}
 		size_t ka = 1, kb = 1;
 		while (i + ka < na && ka <= 8 && first(a.slots[i + ka]) != first(b.slots[j])) ka++;
 		while (j + kb < nb && kb <= 8 && first(b.slots[j + kb]) != first(a.slots[i])) kb++;
@@ -257,8 +438,12 @@ void model1::blend_slots()
 		else if (b_skip) j += kb;                            // slots that are new
 		else pair[j++] = int(i++);                           // the same place, a different model
 	}
+	repaired += repair_by_camera(a, b, pair, changed_run);
+	static const bool logp = getenv("VF_LOG_SMOOTH") != nullptr;
+	if (logp && repaired && !m_redrawing) fprintf(stderr, "P frame %d repaired %d\n", b.frame, repaired);
 	int jumps = 0, paired = 0, missing = 0;
 	for (size_t i = 0; i < b.slots.size(); i++) {
+		if (pair[i] == -2) continue;                       // (scenery that came into the list: at the newer place)
 		if (pair[i] < 0 && !b.slots[i].polys.empty()) missing++;
 		if (pair[i] < 0 || b.slots[i].polys.empty()) continue;
 		const float *pa = a.slots[pair[i]].mat, *pb = b.slots[i].mat;
@@ -275,7 +460,11 @@ void model1::blend_slots()
 			if (la > 0 && lb > 0 && dot < 0.77f * std::sqrt(la * lb)) turned = true;     // over ~40 degrees
 		}
 		if (dx * dx + dy * dy + dz * dz > 0.09f * depth * depth || turned) jumps++;    // fast, or a cut
-		for (int k = 0; k < 12; k++) m_blend[i][k] = pa[k] + (pb[k] - pa[k]) * m_alpha;
+		for (int k = 0; k < 12; k++) m_blend[i][k] = float(pa[k] + (pb[k] - pa[k]) * alpha);
+		memcpy(m_blend_from[i].data(), pa, 12 * sizeof(float));
+		memcpy(m_blend_to[i].data(), pb, 12 * sizeof(float));
+		const slot &sa = a.slots[pair[i]];
+		m_blend_light[i] = { sa.light[0], sa.light[1], sa.light[2], sa.has_light ? 1.0f : 0.0f };
 		m_blend_ok[i] = 1;
 	}
 	// A camera cut moves nearly every part at once (fast moves only a few): then, or when a part
@@ -292,8 +481,12 @@ void model1::blend_slots()
 // While replaying: the matrix for the object being drawn (the current slot's, blended).
 bool model1::smooth_matrix(uint32_t, float *out)
 {
-	if (m_replay_older || m_replay_slot < 0 || m_replay_slot >= int(m_blend_ok.size()) || !m_blend_ok[m_replay_slot]) return false;
+	if ((m_replay_older && !m_replay_extra) || m_replay_slot < 0 || m_replay_slot >= int(m_blend_ok.size()) || !m_blend_ok[m_replay_slot]) return false;
 	memcpy(out, m_blend[m_replay_slot].data(), 12 * sizeof(float));
+	if (m_replay_extra) { m_shade_from = m_shade_to = m_shade_light = nullptr; return true; }   // (its own shading)
+	m_shade_from = m_blend_from[m_replay_slot].data();
+	m_shade_to = m_blend_to[m_replay_slot].data();
+	m_shade_light = m_blend_light[m_replay_slot].data();
 	return true;
 }
 
@@ -320,6 +513,24 @@ model1::sky_scroll model1::sky_scroll_from_ram(bool between) const
 	s.hx = float(s.h & 0x1ff) + (r1 & 31) / 32.0f;
 	s.vy = float(s.v & 0x3ff) + (sum & 1) * 0.5f;
 	return s;
+}
+
+// Where the sky lands for the camera in RAM now: its own scroll, unmixed (h the heading >> 5, v as
+// the routine's sum of two equal values)
+void model1::sky_settled(int &h, int &v) const
+{
+	auto rd = [&](uint32_t x) { return uint16_t(m_ram_b[x - 0x500000] | m_ram_b[x - 0x500000 + 1] << 8); };
+	h = (rd(0x508004) >> 5) & 0x1ff;
+	v = (rd(0x508006) + 0x21) & 0x3ff;
+}
+
+// Whether the sky can be drawn where it lands from where the game has it in a frame (the tile
+// layer moves 24 pixels at most; a hi-res sky further)
+bool model1::sky_reaches(const sky_sample &s) const
+{
+	const int dh = ((s.lands_h - s.h + 256) & 511) - 256, dv = ((s.lands_v - s.v + 512) & 1023) - 512;
+	const double most = m_sky_now ? MAX_SKY_STEP : 24;
+	return std::abs(dh) <= most && std::abs(dv) <= most;
 }
 
 void model1::sky_scroll_written(uint32_t a)
@@ -364,26 +575,50 @@ void model1::smooth_sky_shift(float &dx, float &dy) const
 		out = d - w * std::round(d / w);
 		return true;
 	};
+	// A step from one frame's scroll to the next is a move, not a jump (a cut), when it's small, or
+	// when it carries on at the speed of the step before it: a stage intro's fly-around turns the
+	// camera 25-60 pixels a frame, which a fixed 24 took for cuts (the sky then stepped a frame at
+	// a time while the 3D glided).
+	auto steady = [&](double step, bool have_before, double before) {
+		return std::fabs(step) <= 24 || (have_before && std::fabs(step) <= MAX_SKY_STEP && std::fabs(step - before) <= 24);
+	};
 	auto moment = [&](bool horizontal) {
 		const int k = std::min(int(std::floor(t)), newest);
 		double fr = t - k;
-		double a, b;
+		double a, b, p;
 		if (!at(k, horizontal, a)) return 0.0;
 		if (fr <= 0) return a;
+		const bool have_p = at(k - 1, horizontal, p);
 		// a jump (a cut) isn't crossed: the scroll changes at the frame, as the game's
-		if (k < newest) return at(k + 1, horizontal, b) && std::fabs(b - a) <= 24 ? a + (b - a) * fr : a;
+		if (k < newest) return at(k + 1, horizontal, b) && steady(b - a, have_p, a - p) ? a + (b - a) * fr : a;
 		fr = std::min(fr, 1.0);
 		if (cur.next) {                                   // a == 0: the newest frame's
 			const double w = horizontal ? 512 : 1024, d = horizontal ? cur.nx - cur.hx : cur.ny - cur.vy;
 			b = d - w * std::round(d / w);
-			return std::fabs(b) <= 24 ? b * fr : 0.0;
+			return steady(b, have_p, a - p) ? b * fr : 0.0;
 		}
-		return at(k - 1, horizontal, b) && std::fabs(a - b) <= 24 ? a + (a - b) * fr : a;   // else at its speed
+		double pp;
+		const bool have_pp = at(k - 2, horizontal, pp);
+		return have_p && steady(a - p, have_pp, p - pp) ? a + (a - p) * fr : a;   // else at its speed
 	};
 	const int h_now = m_tiles.tile_r(0x5002) & 0x1ff, v_now = m_tiles.tile_r(0x5006) & 0x3ff;
-	const double h_t = cur.hx + moment(true), v_t = cur.vy + moment(false);
 	auto wrapped = [](double d, double w) { return d - w * std::round(d / w); };
+	double h_t = cur.hx + moment(true), v_t = cur.vy + moment(false);
+	if (m_sky_settling_now) {
+		// just after a cut, while the game's mix with the old view's camera moves the sky into
+		// place: where it lands
+		h_t = cur.lands_h;
+		v_t = cur.lands_v;
+	}
 	dx = float(wrapped(h_now - h_t, 512));               // sample at x + (h_now - h_t)
 	dy = float(wrapped(v_t - v_now, 1024));              // and y + (v_t - v_now)
-	if (std::fabs(dx) > 24 || std::fabs(dy) > 24) dx = dy = 0;
+	if (std::fabs(dx) > MAX_SKY_STEP || std::fabs(dy) > MAX_SKY_STEP) dx = dy = 0;
+}
+
+void model1::smooth_state(float &alpha, int &older, int &newer, float *place) const
+{
+	alpha = m_last_alpha;
+	if (place) for (int k = 0; k < 3; k++) place[k] = m_pic_place[k];
+	older = m_logic[0].list.empty() ? -1 : m_logic[0].frame;
+	newer = m_logic[1].list.empty() ? -1 : m_logic[1].frame;
 }

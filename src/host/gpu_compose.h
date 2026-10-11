@@ -7,6 +7,7 @@
 #include "../machine/model1.h"
 #include <SDL3/SDL.h>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -33,9 +34,41 @@ public:
 		if (m_target) SDL_DestroyTexture(m_target);
 		m_target = nullptr;
 		for (auto &t : m_tex) { if (t.tex) SDL_DestroyTexture(t.tex); t = {}; }
+		if (m_pre.tex) SDL_DestroyTexture(m_pre.tex);
+		m_pre = {};
+	}
+
+	// A part that will be needed soon (the next stage sky, model1::sky_pending), uploaded ahead a
+	// band of rows a call, into a texture of its own that draw() then takes in place of the old.
+	void preload(const model1::gpu_image &im, int64_t max_px = 3 << 20)
+	{
+		if (m_max > 0 && (im.w > m_max || im.h > m_max)) return;
+		if (m_pre.gen != im.gen || !m_pre.tex || m_pre.w != im.w || m_pre.h != im.h) {
+			if (!m_pre.tex || m_pre.w != im.w || m_pre.h != im.h) {
+				if (m_pre.tex) SDL_DestroyTexture(m_pre.tex);
+				m_pre = {};
+				m_pre.tex = SDL_CreateTexture(m_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, im.w, im.h);
+				if (!m_pre.tex) return;
+				made++;
+				if (!SDL_SetTextureBlendMode(m_pre.tex, m_keyed) || !SDL_SetTextureScaleMode(m_pre.tex, SDL_SCALEMODE_NEAREST)) {
+					SDL_DestroyTexture(m_pre.tex); m_pre = {}; return;
+				}
+				m_pre.w = im.w; m_pre.h = im.h;
+			}
+			m_pre.gen = im.gen;
+			m_pre.rows = 0;
+		}
+		if (m_pre.rows >= im.h) return;
+		const int n = int(std::clamp<int64_t>(max_px / im.w, 1, im.h - m_pre.rows));
+		const SDL_Rect r{ 0, m_pre.rows, im.w, n };
+		SDL_UpdateTexture(m_pre.tex, &r, im.px + size_t(m_pre.rows) * im.stride, int(im.stride * 4));
+		uploaded += uint64_t(im.w) * n;
+		m_pre.rows += n;
 	}
 	~gpu_compose() { reset(); }
 	SDL_Texture *target() const { return m_target; }
+	int made = 0;              // testing (VF_TRACE): textures made, and pixels uploaded
+	uint64_t uploaded = 0;
 
 	// The parts onto the target (w x h, scaled into the window with `scale_mode`); false: failed
 	// (the caller draws the picture whole instead).
@@ -50,6 +83,7 @@ public:
 		if (!m_target || m_tw != w || m_th != h) {
 			reset();
 			m_target = SDL_CreateTexture(m_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, w, h);
+			made++;
 			if (!m_target) return false;
 			SDL_SetTextureBlendMode(m_target, SDL_BLENDMODE_NONE);
 			m_tw = w; m_th = h;
@@ -59,25 +93,37 @@ public:
 			const model1::gpu_image &im = p.img[i];
 			if (!im.px) continue;
 			part &t = m_tex[i];
+			// uploaded ahead: that texture taken, the old one kept for the next
+			if (m_pre.tex && m_pre.gen == im.gen && t.gen != im.gen && m_pre.rows >= im.h && m_pre.w == im.w && m_pre.h == im.h) {
+				std::swap(t.tex, m_pre.tex);
+				const int ow = t.w, oh = t.h;
+				t.w = im.w; t.h = im.h; t.gen = im.gen;
+				m_pre.w = ow; m_pre.h = oh; m_pre.gen = ~0ull; m_pre.rows = 0;
+				if (!m_pre.tex) m_pre = {};
+				continue;
+			}
 			bool fresh = false;
 			if (!t.tex || t.w != im.w || t.h != im.h) {
 				if (t.tex) SDL_DestroyTexture(t.tex);
 				t = {};
 				t.tex = SDL_CreateTexture(m_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, im.w, im.h);
+				made++;
 				if (!t.tex) return false;
 				if (!SDL_SetTextureBlendMode(t.tex, m_keyed) || !SDL_SetTextureScaleMode(t.tex, SDL_SCALEMODE_NEAREST)) return false;
 				t.w = im.w; t.h = im.h;
 				fresh = true;
 			}
 			if (i == model1::TEX_3D) {                // what changed (all of it the first time)
-				if (fresh || p.d3_all) SDL_UpdateTexture(t.tex, nullptr, im.px, int(im.stride * 4));
+				if (fresh || p.d3_all) { SDL_UpdateTexture(t.tex, nullptr, im.px, int(im.stride * 4)); uploaded += uint64_t(im.w) * im.h; }
 				else
 					for (const auto &c : p.d3_changed) {
 						const SDL_Rect r{ c.x0, c.y0, c.x1 - c.x0, c.y1 - c.y0 };
+						uploaded += uint64_t(r.w) * r.h;
 						SDL_UpdateTexture(t.tex, &r, im.px + size_t(c.y0) * im.stride + c.x0, int(im.stride * 4));
 					}
 			} else if (fresh || t.gen != im.gen) {
 				SDL_UpdateTexture(t.tex, nullptr, im.px, int(im.stride * 4));
+				uploaded += uint64_t(im.w) * im.h;
 				t.gen = im.gen;
 			}
 		}
@@ -208,6 +254,7 @@ public:
 private:
 	std::vector<uint32_t> m_first_3d;
 	struct part { SDL_Texture *tex = nullptr; int w = 0, h = 0; uint64_t gen = ~0ull; };
+	struct pre_part { SDL_Texture *tex = nullptr; int w = 0, h = 0, rows = 0; uint64_t gen = ~0ull; } m_pre;
 	SDL_Renderer *m_ren = nullptr;
 	SDL_Texture *m_target = nullptr;
 	int m_tw = 0, m_th = 0, m_max = 0;

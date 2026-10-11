@@ -9,6 +9,9 @@
 // edge; the rows come from where the tile chip drew each line from. The replacement is then
 // drawn across the whole width, so widescreen shows the real panorama to the sides.
 #include "model1.h"
+#include <future>
+#include <memory>
+#include <thread>
 
 namespace {
 
@@ -126,12 +129,15 @@ bool model1::prepare_sky(sky_art &a)
 	if (m_redrawing) return false;                   // drawing a shown picture again: as it was, settling or not
 	if (sig != a.pending_sig) { a.pending_sig = sig; a.pending_count = 0; }
 	if (++a.pending_count < 6) return false;
+	const uint64_t t0 = trace_ns();
 	a.w = 2048;
 	a.h = a.rows * 8;
 	a.px.assign(size_t(a.w) * a.h, 0);
 	m_tiles.render_entries(a.entries.data(), 256, a.rows, a.px.data());
 	a.pen_sig = sig;
 	if (m_sky_scaled_for == &a) m_sky_scaled_for = nullptr;
+	m_work.sky_build++;
+	m_work.sky_build_ns += trace_ns() - t0;
 	return true;
 }
 
@@ -168,7 +174,7 @@ void model1::find_sky()
 	if (best_votes >= 2) {
 		m_sky_now = m_sky_last = best;
 		m_sky_base = best_base;
-		if (!prepare_sky(*m_sky_now)) m_sky_now = nullptr;
+		if (!prepare_sky(*m_sky_now) || !sky_ready(*m_sky_now)) m_sky_now = nullptr;
 		m_sky_last_tx0 = tx0;
 		return;
 	}
@@ -178,7 +184,7 @@ void model1::find_sky()
 		const int d = ((tx0 - m_sky_last_tx0 + 256) & 511) - 256;
 		const int base = (m_sky_base + d) & 2047;
 		if (!sky_agrees(*m_sky_last, tx0, base)) { m_sky_last = nullptr; return; }
-		m_sky_now = prepare_sky(*m_sky_last) ? m_sky_last : nullptr;
+		m_sky_now = prepare_sky(*m_sky_last) && sky_ready(*m_sky_last) ? m_sky_last : nullptr;
 		m_sky_base = base;
 		m_sky_last_tx0 = tx0;
 	}
@@ -269,7 +275,7 @@ taps make_taps(int src, int dst, bool wrap, int mode = TAPS_AREA)
 }
 
 // A light Gaussian blur (sigma 0.6 pixels; across wraps round, down stops at the edges).
-std::vector<uint32_t> model1::soften(const std::vector<uint32_t> &px, int w, int h)
+std::vector<uint32_t> model1::soften(const std::vector<uint32_t> &px, int w, int h, const rows_fn &rows)
 {
 	const float sigma = 0.6f;
 	float k[5], sum = 0;
@@ -277,7 +283,7 @@ std::vector<uint32_t> model1::soften(const std::vector<uint32_t> &px, int w, int
 	for (float &v : k) v /= sum;
 	auto blur = [&](const std::vector<uint32_t> &in, bool across) {
 		std::vector<uint32_t> out(in.size());
-		parallel_rows(h, [&](int y0, int y1) {
+		rows(h, [&](int y0, int y1) {
 			for (int y = y0; y < y1; y++)
 				for (int x = 0; x < w; x++) {
 					float r = 0, g = 0, b = 0;
@@ -295,28 +301,25 @@ std::vector<uint32_t> model1::soften(const std::vector<uint32_t> &px, int w, int
 }
 
 // The replacement resampled to exactly the render scale: 2048 x s by rows x 8 x s, so drawing it
-// is copying rows. Made when the stage or the scale changes.
-void model1::scale_sky(const sky_art &a)
+// is copying rows. Made when the stage or the scale changes: on threads of its own, while the
+// game goes on (sky_ready).
+void model1::scale_sky_px(const sky_art &a, int s, bool smooth, std::vector<uint32_t> &out, const rows_fn &rows)
 {
-	m_sky_edges_art = nullptr;                      // the edge colours are worked out again
-	const int s = m_scale, W = 2048 * s, H = a.rows * 8 * s;
-	m_sky_scaled.assign(size_t(W) * H, 0);
-	m_sky_scaled_for = &a;
-	m_sky_scaled_s = s;
-	m_sky_gen++;
+	const int W = 2048 * s, H = a.rows * 8 * s;
+	out.assign(size_t(W) * H, 0);
 	// the stages' own skies: the pixels as they are (filter off), or softened a touch (the
 	// dithering and stair steps blur away) and enlarged with Catmull-Rom; pictures: area / blend
-	const int mode = !a.original ? TAPS_AREA : m_sky_smooth ? TAPS_CUBIC : TAPS_NEAREST;
+	const int mode = !a.original ? TAPS_AREA : smooth ? TAPS_CUBIC : TAPS_NEAREST;
 	const std::vector<uint32_t> *source = &a.px;
 	std::vector<uint32_t> soft;
-	if (a.original && m_sky_smooth) {
-		soft = soften(a.px, a.w, a.h);
+	if (a.original && smooth) {
+		soft = soften(a.px, a.w, a.h, rows);
 		source = &soft;
 	}
 	const taps tx = make_taps(a.w, W, true, mode), ty = make_taps(a.h, H, false, mode);
 	// across first (to W x a.h, as floats per channel), then down
 	std::vector<float> mid(size_t(W) * a.h * 3);
-	parallel_rows(a.h, [&](int y0, int y1) {
+	rows(a.h, [&](int y0, int y1) {
 		for (int y = y0; y < y1; y++) {
 			const uint32_t *src = &(*source)[size_t(y) * a.w];
 			float *d = &mid[size_t(y) * W * 3];
@@ -331,9 +334,9 @@ void model1::scale_sky(const sky_art &a)
 			}
 		}
 	});
-	parallel_rows(H, [&](int Y0, int Y1) {
+	rows(H, [&](int Y0, int Y1) {
 		for (int Y = Y0; Y < Y1; Y++) {
-			uint32_t *d = &m_sky_scaled[size_t(Y) * W];
+			uint32_t *d = &out[size_t(Y) * W];
 			for (int X = 0; X < W; X++) {
 				float r = 0, g = 0, b = 0;
 				for (int k = 0; k < ty.count[Y]; k++) {
@@ -348,12 +351,87 @@ void model1::scale_sky(const sky_art &a)
 	});
 }
 
+// Here and now, on the drawing threads (a picture drawn again that can't wait).
+void model1::scale_sky(const sky_art &a)
+{
+	m_sky_edges_art = nullptr;                      // the edge colours are worked out again
+	scale_sky_px(a, m_scale, m_sky_smooth, m_sky_scaled, [](int n, const std::function<void(int, int)> &f) { parallel_rows(n, f); });
+	m_sky_scaled_for = &a;
+	m_sky_scaled_s = m_scale;
+	m_sky_gen = ++m_sky_gen_next;
+}
+
+// Whether the sky is ready at the render scale. A new one (a stage, a scale, the filter) is scaled
+// on threads of its own while the game runs on, the stage's tile layer drawn as it is meanwhile, and
+// taken from SKY_LEAD game frames after it started (waited for then, if it isn't done: so which
+// frames show it doesn't depend on how fast the machine is). Scaling it here and now took 25-35 ms
+// at 3x-4x: a picture or two missed at every stage's start.
+bool model1::sky_ready(const sky_art &a)
+{
+	constexpr uint64_t SKY_LEAD = 10;
+	if (m_sky_scaled_for == &a && m_sky_scaled_s == m_scale) return true;
+	const uint64_t version = a.original ? a.pen_sig : 0;
+	const bool same_job = m_sky_job.valid() && m_sky_job_for == &a && m_sky_job_s == m_scale &&
+						  m_sky_job_smooth == m_sky_smooth && m_sky_job_version == version;
+	if (!same_job) {
+		if (m_sky_job.valid()) m_sky_job.wait();      // (an old one's, no longer wanted)
+		m_sky_job_for = &a; m_sky_job_s = m_scale; m_sky_job_smooth = m_sky_smooth; m_sky_job_version = version;
+		m_sky_job_frame = m_frame;
+		m_sky_job_gen = ++m_sky_gen_next;
+		if (getenv("VF_DBG_SKY")) fprintf(stderr, "DBG sky job frame %llu art %p s %d smooth %d version %llx\n", (unsigned long long)m_frame, (const void *)&a, m_scale, int(m_sky_smooth), (unsigned long long)version);
+		auto art = std::make_shared<sky_art>();
+		art->px = a.px; art->w = a.w; art->h = a.h; art->rows = a.rows; art->original = a.original;
+		const int s = m_scale;
+		const bool smooth = m_sky_smooth;
+		std::vector<uint32_t> *out = &m_sky_job_px;
+		m_sky_job = std::async(std::launch::async, [art, s, smooth, out] {
+			const uint64_t t0 = trace_ns();
+			// its own threads: the drawing threads' pool takes one caller at a time
+			scale_sky_px(*art, s, smooth, *out, [](int n, const std::function<void(int, int)> &f) {
+				const int t = std::clamp(int(std::thread::hardware_concurrency()) / 2, 1, 4);
+				std::vector<std::thread> th;
+				for (int i = 1; i < t; i++) th.emplace_back([&, i] { f(n * i / t, n * (i + 1) / t); });
+				f(0, n / t);
+				for (auto &x : th) x.join();
+			});
+			return trace_ns() - t0;
+		});
+	}
+	// the game stopped (paused or in the menu, a new scale or shape chosen): no frames run to wait
+	// out, so it's taken as soon as it's done (else the sky stayed black until play went on)
+	if (!m_stopped && m_frame < m_sky_job_frame + SKY_LEAD) return false;
+	m_work.sky_scale_ns += m_sky_job.get();
+	m_work.sky_scale++;
+	m_sky_scaled.swap(m_sky_job_px);
+	m_sky_job_px.clear();
+	m_sky_job_px.shrink_to_fit();
+	m_sky_edges_art = nullptr;
+	m_sky_scaled_for = &a;
+	m_sky_scaled_s = m_scale;
+	m_sky_gen = m_sky_job_gen;
+	return true;
+}
+
+bool model1::sky_pending(gpu_image &im) const
+{
+	if (!m_sky_job.valid() || m_sky_job.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+	const int W = 2048 * m_sky_job_s, H = m_sky_job_px.empty() ? 0 : int(m_sky_job_px.size() / size_t(W));
+	if (H == 0) return false;
+	im = { m_sky_job_px.data(), W, H, size_t(W), m_sky_job_gen };
+	return true;
+}
+
 // Over the sky layer's rows, the replacement, across the full width.
 void model1::draw_sky(bitmap_rgb32 &bitmap, float sdx, float sdy)
 {
 	const sky_art &a = *m_sky_now;
 	const int s = m_scale, out_w = bitmap.width(), tw = m_tile_tmp.width();
-	if (m_sky_scaled_for != &a || m_sky_scaled_s != s) scale_sky(a);
+	if (m_sky_scaled_for != &a || m_sky_scaled_s != s) {   // (not ready: sky_ready said so first)
+		const uint64_t t0 = trace_ns();
+		scale_sky(a);
+		m_work.sky_scale_sync++;
+		m_work.sky_scale_ns += trace_ns() - t0;
+	}
 	const int W = 2048 * s, H = a.rows * 8 * s;
 	// the rows: the panorama's row for one line drawn from it, and the rest by the vertical scroll,
 	// so the picture's top and bottom carry on over the plain sky and ground around it
@@ -370,7 +448,11 @@ void model1::draw_sky(bitmap_rgb32 &bitmap, float sdx, float sdy)
 	const int ox = sky_shift_x(sdx, s), oy = sky_shift_y(sdy, s);
 	const int x_off = (((m_sky_base - m_ext) * s + ox) % W + W) % W;
 	static const bool log = getenv("VF_LOG_SKY") != nullptr;
-	if (log) fprintf(stderr, "K %.3f base %d dx %.3f x %.3f dy %.3f\n", m_draw_time, m_sky_base, sdx, m_sky_base + sdx, sdy);
+	if (log && !m_redrawing) {
+		const sky_sample &cs = m_sky_hist[(m_frame - 1) % SKY_HIST];
+		fprintf(stderr, "K %.3f base %d dx %.3f x %.3f dy %.3f h %d v %d read %d%d hx %.3f vy %.3f next %d f %llu\n", m_draw_time, m_sky_base, sdx, m_sky_base + sdx, sdy,
+				m_tiles.tile_r(0x5002) & 0x1ff, m_tiles.tile_r(0x5006) & 0x3ff, int(m_sky_read_h), int(m_sky_read_v), cs.hx, cs.vy, int(cs.next), (unsigned long long)m_frame);
+	}
 	const int y_base = (ref_ty - ref_y) * s + oy;
 	// Above and below the panorama (the camera looking up or down past it): its plain top and
 	// bottom colours, the commonest along its first and last rows. Repeating those rows instead
@@ -472,6 +554,12 @@ void model1::draw_screen_sides(bitmap_rgb32 &bitmap)
 		}
 	}
 	const int s = m_scale, left = m_ext * s, right = (m_ext + SCREEN_W) * s, out_w = bitmap.width();
+	if (&bitmap == &m_sides) {                     // (the GPU's copy: painted again only when it changes)
+		if (m_sides_art == &a && !memcmp(m_sides_gain, gain, sizeof m_sides_gain)) return;
+		m_sides_art = &a;
+		memcpy(m_sides_gain, gain, sizeof m_sides_gain);
+		m_sides_gen++;
+	}
 	parallel_rows(SCREEN_H * s, [&](int Y0, int Y1) {
 		for (int Y = Y0; Y < Y1; Y++) {
 			const uint32_t *row = &a.px[size_t(pic_y((Y + 0.5) / s)) * a.w];

@@ -572,6 +572,7 @@ void model1::redraw()
 		if (old) swap_still();
 	}
 	m_unshown = false;
+	m_frame_parts = false;
 	m_render_done = render_done;
 	m_last_quads = quads;
 }
@@ -631,6 +632,7 @@ void model1::prepare_layers()
 		if (c.frame != m_frame || c.flags != flags || c.ext != m_ext || c.px.width() != tw) todo[n++] = l;
 	}
 	if (n < 2) return;
+	m_work.layers += n;
 	m_tiles.m_ox = m_ext;
 	m_layers_together = true;
 	parallel_jobs(n, [&](int i) { cached_layer(todo[i], todo[i] == 6 ? segas24_tile::DRAW_OPAQUE : 0); });
@@ -684,6 +686,9 @@ void model1::draw_tiles(bitmap_rgb32 &bitmap, const rectangle &cliprect, int lay
 	if (layer == 4 && (flags & segas24_tile::DRAW_OPAQUE)) smooth_sky_shift(sdx, sdy);
 	// a hi-res sky draws over every row of this layer: nothing to draw beneath it
 	if (sky && m_sky_now) { draw_sky(bitmap, sdx, sdy); return; }
+	// the tile layer itself moves no more than 24 pixels (its padding is 32: more showed its clamped
+	// edge); a panorama wraps round, so it takes the whole move
+	if (std::fabs(sdx) > 24 || std::fabs(sdy) > 24) sdx = sdy = 0;
 	if (m_parts) { parts_layer(layer, flags, *tmp, stretch, sdx, sdy); return; }   // the GPU enlarges it
 	if (sdx != 0 || sdy != 0) {
 		const int oy = sky_shift_y(sdy, s), ox = sky_shift_x(sdx, s);
@@ -756,8 +761,18 @@ void model1::screen_update(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 	view->ayyc = cos(view->ayy);
 	view->ayys = sin(view->ayy);
 
-	if (m_tiles_updated != m_frame) { m_tiles.update(m_pens); m_tiles_updated = m_frame; }   // (once per game frame)
-	prepare_layers();
+	if (m_tiles_updated != m_frame) {                // (once per game frame)
+		const uint64_t t0 = trace_ns();
+		m_work.tiles_full += m_tiles.all_to_decode();
+		m_tiles.update(m_pens);
+		m_tiles_updated = m_frame;
+		m_work.tiles_ns += trace_ns() - t0;
+	}
+	{
+		const uint64_t t0 = trace_ns();
+		prepare_layers();
+		m_work.layers_ns += trace_ns() - t0;
+	}
 	if (m_parts) parts_begin(bitmap);                // the GPU fills it, and the 3D goes over nothing
 	else { bitmap.fill(m_pens[0], cliprect); m_bitmap_whole = true; }
 	static const bool log_scroll = getenv("VF_LOG_SCROLL") != nullptr;
@@ -789,10 +804,20 @@ void model1::screen_update(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		for (const auto &a : m_screens)
 			if (a.hash == h) m_screen_now = &a;
 	}
-	if (m_parts && m_screen_now) { m_parts_whole = true; return; }   // (its painted sides: drawn whole)
 	draw_tiles(bitmap, cliprect, 6, segas24_tile::DRAW_OPAQUE);
 	draw_tiles(bitmap, cliprect, 4, segas24_tile::DRAW_OPAQUE);
-	if (m_screen_now) draw_screen_sides(bitmap);
+	if (m_screen_now && m_parts) {
+		// its painted sides, as an image of their own over the backdrop (KEY between them)
+		if (m_sides.width() != bitmap.width() || m_sides.height() != bitmap.height()) {
+			m_sides.allocate(bitmap.width(), bitmap.height());
+			m_sides.fill(0xff000000);
+			m_sides_art = nullptr;
+		}
+		draw_screen_sides(m_sides);
+		m_parts->img[TEX_SIDES] = { &m_sides.pix(0), m_sides.width(), m_sides.height(), size_t(m_sides.width()), m_sides_gen };
+		gpu_op o; o.tex = TEX_SIDES; o.sw = o.dw = float(m_sides.width()); o.sh = o.dh = float(m_sides.height());
+		m_parts->ops.push_back(o);
+	} else if (m_screen_now) draw_screen_sides(bitmap);
 	if (m_parts) {
 		parts_composite(m_mid, m_mid_key, m_mid_gen, { 2, 0 });
 		m_parts->img[TEX_MID] = { &m_mid.pix(0), m_mid.width(), m_mid.height(), size_t(m_mid.width()), m_mid_gen };
@@ -808,8 +833,18 @@ void model1::screen_update(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 	static const bool no_polys = getenv("VF_NO_POLYS") != nullptr;   // debug: the 2D layers alone
 	m_above_hud_seen = false;
 	m_frame_quads = 0;
+	// (Low antialiasing, a picture drawn whole: what's under the 3D marked, to tell the 3D's pixels by)
+	if (m_edge_aa && !m_parts && !no_polys)
+		parallel_rows(bitmap.height(), [&](int a, int b) {
+			for (int y = a; y < b; y++) { uint32_t *p = &bitmap.pix(y); for (int x = 0; x < bitmap.width(); x++) p[x] |= UNDER_3D; }
+		});
 	if (!no_polys) tgp_render(bitmap, cliprect, RENDER_BELOW_HUD);
 	clear_moire_marks(bitmap, cliprect);
+	if (m_edge_aa && !no_polys) {
+		const uint64_t t0 = trace_ns();
+		edge_smooth(bitmap, m_parts != nullptr);
+		m_work.edge_ns += trace_ns() - t0;
+	}
 
 	if (m_parts) {
 		parts_composite(m_top, m_top_key, m_top_gen, { 7, 5, 3, 1 });
@@ -869,7 +904,7 @@ void model1::clear_moire_marks(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 				p[x] = ((parts_below(x, y) >> 1) & 0x7f7f7f) + (p[x] & 0x7f7f7f);
 				continue;
 			}
-			p[x] &= 0xffffff;
+			p[x] &= 0xffffff | UNDER_3D;              // (Low antialiasing's mark stays until it's read)
 		}
 	}
 }

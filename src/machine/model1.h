@@ -6,6 +6,8 @@
 #include <cmath>
 #include <unordered_map>
 #include <array>
+#include <future>
+#include <functional>
 #include <string>
 
 #include "mame_lite.h"
@@ -32,6 +34,13 @@ public:
 		std::vector<uint8_t> tgp_program;   // 315-5724.bin, when the set has it
 		std::vector<uint8_t> ioboard;       // epr-14869b.25 (model1io), when there
 	};
+
+	// Testing (the host's VF_TRACE): the one-off work done since the counts were last cleared.
+	struct work_trace {
+		int tiles_full = 0, layers = 0, sky_build = 0, sky_scale = 0, sky_scale_sync = 0, padded = 0;
+		uint64_t tiles_ns = 0, layers_ns = 0, sky_build_ns = 0, sky_scale_ns = 0, padded_ns = 0, edge_ns = 0;
+	} m_work;
+	static uint64_t trace_ns();
 
 	explicit model1(regions &&r);
 	void reset();
@@ -84,6 +93,10 @@ public:
 	bool load_sky(const std::string &name, std::vector<uint32_t> xrgb, int w, int h);
 	// The stages' own skies above 1x: softened and smoothly enlarged, or the original pixels.
 	void set_sky_filter(bool smooth);
+	// Antialiasing's Low: the 3D's edges smoothed after it's drawn (edge_aa.cpp), at the render
+	// scale, for about a tenth of the cost of drawing 4 times the pixels
+	void set_edge_aa(bool on) { m_edge_aa = on; }
+	bool edge_aa() const { return m_edge_aa; }
 	uint32_t backdrop_hash() const;
 	int sky_identity();                 // the stage sky in the map (-1: none known), see model1_sky.cpp
 	// The full-screen 4:3 pictures (title, player select) with their sides filled for widescreen:
@@ -112,6 +125,7 @@ public:
 	// frame() holds a picture that wasn't shown (a held scene change, or a picture put together by
 	// the GPU): redraw() puts back the one that was, before a still (paused, the menu) shows frame().
 	bool frame_unshown() const { return m_unshown; }
+	bool frame_in_parts() const { return m_unshown && m_frame_parts; }   // frame() holds only the 3D of a picture in parts
 
 	// The picture in parts, for the GPU to put together (model1_gpu.cpp): render_smooth's picture for
 	// the same moment, with the 2D left at the arcade's resolution (uploaded once a game frame, when
@@ -126,7 +140,7 @@ public:
 	// the CPU blends it with what's drawn (parts_below), if no polygon has covered it by then
 	static constexpr uint32_t SHADOW_KEY = 0xfd000000;
 	static constexpr int PAD = 32;                  // arcade pixels round a moved backdrop's image
-	enum { TEX_L6, TEX_L4, TEX_L6M, TEX_L4M, TEX_MID, TEX_TOP, TEX_SKY, TEX_3D, TEX_COUNT };
+	enum { TEX_L6, TEX_L4, TEX_L6M, TEX_L4M, TEX_MID, TEX_TOP, TEX_SKY, TEX_3D, TEX_SIDES, TEX_COUNT };
 	struct gpu_image { const uint32_t *px = nullptr; int w = 0, h = 0; size_t stride = 0; uint64_t gen = 0; };
 	struct gpu_op { int tex = -1; float sx = 0, sy = 0, sw = 0, sh = 0, dx = 0, dy = 0, dw = 0, dh = 0; int clip_x0 = 0, clip_x1 = 1 << 30; uint32_t colour = 0; };
 	struct gpu_parts {
@@ -139,7 +153,24 @@ public:
 	// 1: drawn in parts; 2: drawn whole into frame() instead (a 4:3 screen's painted sides; the
 	// host leaves antialiasing to the CPU on its own); 0: nothing new (a cut's hold: the picture
 	// shown stays).
-	int render_parts(double now, gpu_parts &p);
+	// shown false: a picture only looked at (scene_sync's, during a hold), as render_smooth's
+	int render_parts(double now, gpu_parts &p, bool shown = true);
+	bool frame_blank() const;
+	// A sky being scaled that's done but not yet in use (sky_ready takes it a few frames after it
+	// started): the host can upload it ahead, a part a refresh, so taking it costs nothing then.
+	bool sky_pending(gpu_image &im) const;
+	const gpu_parts *m_last_parts = nullptr;         // what frame() holds the 3D of, when in parts
+	// the host puts pictures together from parts: a frame with no 3D is drawn in parts too
+	void set_parts_mode(bool on) { m_parts_mode = on; }
+	// the host has the game stopped (paused, the menu): no frames run until it goes on
+	void set_stopped(bool on) { m_stopped = on; }
+	// testing (VF_TRACE): the last smooth picture's blend, and the two lists' frames it was between
+	void smooth_state(float &alpha, int &older, int &newer, float *place = nullptr) const;
+	float m_last_alpha = 1;
+	float m_pic_place[3] = { 0, 0, 0 };                // testing: the 3D's mean place in the picture last drawn (the trace)
+	bool m_stopped = false;
+	bool m_parts_mode = false;
+	gpu_parts m_own_parts;
 	// The parts put together on the CPU, pixel by pixel, as the GPU must (for checking a renderer):
 	// out is w x h, 0x00rrggbb. `upto`: stop at the first op with that image (-1: all of them).
 	static void compose_cpu(const gpu_parts &p, int w, int h, std::vector<uint32_t> &out);
@@ -229,7 +260,12 @@ private:
 	bool m_wide_frame = true;        // this frame uses the extra width (the fight); else 4:3 in the middle
 	bool m_fight_cam = true;         // the last camera sent was the fight's (kept at 4:3 too)
 	bool fight_camera() const;
-	struct slot { float mat[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 }; std::vector<uint32_t> polys; };
+	struct slot {
+		float mat[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+		std::vector<uint32_t> polys;
+		float light[3] = { 0, 0, 0 };                // the list's light vector (command 0xa) where this slot is
+		bool has_light = false;
+	};
 	struct logic_frame {
 		std::vector<uint16_t> list;                  // the display list as the game left it
 		uint64_t hash = 0;
@@ -239,34 +275,47 @@ private:
 		int objects = 0;
 	};
 	logic_frame m_logic[2];                         // the game frame before, and the last
+	logic_frame m_logic_prev;                       // and the one before those (a cut's older view goes on from it)
+	bool m_replay_extra = false;                    // the older list drawn carried on past its frame (m_blend from the one before)
 	bool m_smooth = false, m_replaying = false;
 	float m_alpha = 1;
 	int m_smooth_stats[3] = {};                     // per picture: unmatched, jumped, blended objects
 	std::vector<std::array<float, 12>> m_blend;     // per slot of the newer list, the blended matrix
 	std::vector<uint8_t> m_blend_ok;
+	// per slot of the newer list, what each polygon's shade is blended from: the older and newer
+	// frames' matrices and the older frame's light (the newer's is the list's own as it's drawn)
+	std::vector<std::array<float, 12>> m_blend_from, m_blend_to;
+	std::vector<std::array<float, 4>> m_blend_light;   // x, y, z, and 1 when known
+	// while an object is drawn blended: its shades too (push_object)
+	const float *m_shade_from = nullptr, *m_shade_to = nullptr, *m_shade_light = nullptr;
 	int m_replay_slot = -1;                          // the slot being drawn while replaying
 	double m_draw_time = 0;                          // the moment being drawn, in frames
 	bool m_shown = false;                            // a smooth picture has been shown: its moment, the frame drawn in
 	double m_shown_now = 0;
 	uint64_t m_shown_frame = ~0ull;
 	bool m_unshown = false;                          // m_bitmap holds a picture that wasn't shown
+	bool m_frame_parts = false;                      // ... drawn in parts (only its 3D)
 	bool m_redrawing = false;                        // redraw(): drawing the shown picture again
 	void keep_still();
 	void swap_still();
 	static constexpr int SKY_HIST = 16;
+	static constexpr double MAX_SKY_STEP = 160;     // the most smooth motion moves the sky between frames
 	// the sky's scroll each frame, as the tile chip has it (h, v) and with the fractions the game
 	// dropped (hx, vy: h & 0x1ff and v & 0x3ff plus those); nx, ny: the next frame's, worked out as
 	// this one ends (next: when it could be)
-	struct sky_sample { int frame = -1; uint16_t h = 0, v = 0; float hx = 0, vy = 0, nx = 0, ny = 0; bool next = false; };
+	struct sky_sample { int frame = -1; uint16_t h = 0, v = 0; float hx = 0, vy = 0, nx = 0, ny = 0; bool next = false; int lands_h = 0, lands_v = 0; };
 	sky_sample m_sky_hist[SKY_HIST];
 	struct sky_scroll { uint16_t h = 0, v = 0; float hx = 0, vy = 0; };
 	sky_scroll sky_scroll_from_ram(bool between) const;   // what the game's routine writes, from what it reads
+	void sky_settled(int &h, int &v) const;              // where the sky lands for the camera in RAM now
+	bool sky_reaches(const sky_sample &s) const;
 	float m_sky_frac_h = 0, m_sky_frac_v = 0;        // the fractions of the scroll last written
 	bool m_sky_read_h = false, m_sky_read_v = false; // and whether those writes were the routine's
 	bool m_sky_between = false;                      // the frame between two of the game's
 	uint64_t m_sky_written = ~0ull;                  // the frame they were written in
 	void sky_scroll_written(uint32_t a);
-	void blend_slots();
+	void blend_slots(const logic_frame &a, const logic_frame &b, double alpha);
+	int repair_by_camera(const logic_frame &a, const logic_frame &b, std::vector<int> &pair, const std::vector<char> &changed_run);
 	void index_objects(logic_frame &lf);
 	void record_frame();
 	bool smooth_matrix(uint32_t poly_adr, float *out);
@@ -299,10 +348,20 @@ private:
 	bool m_sky_smooth = false;
 	bool m_blend_cut = false, m_replay_older = false;   // smooth motion at a cut: the older list shown
 	int m_cut_frame = -1;                              // the newest cut (its list's frame)
-	bool sky_settling() const;
+	bool m_sky_settling_now = false;                   // this picture is just after a cut, the sky still moving into place
 	void init_skies();
 	bool prepare_sky(sky_art &a);
-	static std::vector<uint32_t> soften(const std::vector<uint32_t> &px, int w, int h);
+	using rows_fn = std::function<void(int, const std::function<void(int, int)> &)>;
+	static std::vector<uint32_t> soften(const std::vector<uint32_t> &px, int w, int h, const rows_fn &rows);
+	static void scale_sky_px(const sky_art &a, int s, bool smooth, std::vector<uint32_t> &out, const rows_fn &rows);
+	bool sky_ready(const sky_art &a);
+	uint64_t m_sky_job_gen = 0;
+	std::vector<uint32_t> m_sky_job_px;             // (before the job: it goes after it, waited for)
+	std::future<uint64_t> m_sky_job;                // a sky being scaled (sky_ready)
+	const sky_art *m_sky_job_for = nullptr;
+	int m_sky_job_s = 0;
+	bool m_sky_job_smooth = false;
+	uint64_t m_sky_job_version = 0, m_sky_job_frame = 0;
 	int m_sky_base = 0, m_sky_last_tx0 = 0;         // panorama x of the picture's left edge
 	std::vector<uint32_t> m_sky_scaled;             // the current sky at the render scale
 	std::vector<int> m_col_src;                     // per output column, the arcade column (smooth sky)
@@ -330,13 +389,28 @@ private:
 	gpu_parts *m_parts = nullptr;                    // being drawn in parts
 	bool m_parts_whole = false;                     // this picture can't be: draw it whole
 	bitmap_rgb32 m_mid, m_top, m_l6m, m_l4m;         // 1x: the 2D under the 3D, over it; backdrops padded
+	// a backdrop stretched across a widescreen picture: its columns picked here, as draw_tiles picks
+	// them, at the render width (a GPU's sampling at a texel's very edge isn't the CPU's floor)
+	bitmap_rgb32 m_stretched[2];
+	// a 4:3 screen's painted sides at the render scale (KEY between them), for the GPU: painted again
+	// only when the picture, its fade (the gains) or the size changes
+	bitmap_rgb32 m_sides;
+	const void *m_sides_art = nullptr;
+	float m_sides_gain[6] = {};
+	uint64_t m_sides_gen = 0;
+	uint64_t m_stretched_key[2] = { ~0ull, ~0ull }, m_stretched_gen[2] = { 0, 0 };
+	const bitmap_rgb32 &stretched(int i, const bitmap_rgb32 &src, int y0, int rows, float sdx, bool moved, uint64_t src_gen);
 	uint64_t m_mid_key = ~0ull, m_top_key = ~0ull, m_l6m_key = ~0ull, m_l4m_key = ~0ull;
-	uint64_t m_mid_gen = 0, m_top_gen = 0, m_l6m_gen = 0, m_l4m_gen = 0, m_sky_gen = 0;
+	uint64_t m_mid_gen = 0, m_top_gen = 0, m_l6m_gen = 0, m_l4m_gen = 0, m_sky_gen = 0, m_sky_gen_next = 0;
 	// a layer image as last handed over, so its number changes only when its pixels do
 	struct kept_image { const void *src = nullptr; uint64_t src_gen = ~0ull, gen = 0; std::vector<uint32_t> px; };
 	kept_image m_kept[2];
 	uint64_t kept_gen(kept_image &k, const bitmap_rgb32 &b, uint64_t src_gen);
 	int m_d3_y0 = 0, m_d3_y1 = -1;                   // the rows the 3D may have drawn in, this picture
+	bool m_edge_aa = false;
+	std::vector<std::vector<std::pair<uint32_t, uint32_t>>> m_aa_changes;   // edge_aa: each band's blends (pixel, colour)
+	static constexpr uint32_t UNDER_3D = 0x40000000;  // edge_aa, drawn whole: a pixel the 3D hasn't drawn (yet)
+	void edge_smooth(bitmap_rgb32 &bitmap, bool parts);
 	std::vector<std::pair<int16_t, int16_t>> m_span; // m_bitmap: KEY but [first, second) of each row
 	bool m_bitmap_whole = true;                      // (or none of it is KEY: a picture drawn whole)
 	void parts_layer(int layer, int flags, const bitmap_rgb32 &px, bool stretch, float sdx, float sdy);
@@ -756,7 +830,7 @@ private:
 	struct still_state
 	{
 		uint64_t frame = ~0ull;
-		logic_frame logic[2];
+		logic_frame logic[2], logic_prev;
 		int cut_frame = -1;
 		sky_sample sky_hist[SKY_HIST];
 		std::vector<uint16_t> tile_ram, char_ram, palette, color_xlat;

@@ -84,7 +84,7 @@ bool g_test_pending = false;   // the menu's Service menu: pressed once the game
 // Testing: VF_SCRIPT=file plays a vfscript-style script of inputs (wait, press, hold, release, mash,
 // pokenv; rec and stop mark what VF_CAPTURE=dir saves: every picture shown, as the player sees it),
 // one step per game frame, so the real game loop can be checked at a point deep in a play.
-struct script_frame { uint8_t in[3] = { 0, 0, 0 }; std::vector<std::pair<uint32_t, uint8_t>> pokes; };
+struct script_frame { uint8_t in[3] = { 0, 0, 0 }; std::vector<std::pair<uint32_t, uint8_t>> pokes, work_pokes; };
 std::vector<script_frame> g_plan;
 size_t g_plan_i = 0, g_rec_from = SIZE_MAX, g_rec_to = SIZE_MAX;
 void load_script(const char *path)
@@ -92,12 +92,13 @@ void load_script(const char *path)
 	FILE *f = fopen(path, "r");
 	if (!f) return;
 	uint8_t held[3] = { 0, 0, 0 };
-	std::vector<std::pair<uint32_t, uint8_t>> pokes;
+	std::vector<std::pair<uint32_t, uint8_t>> pokes, work_pokes;
 	auto add = [&](int n, const uint8_t *extra) {
 		for (int i = 0; i < n; i++) {
 			script_frame fr;
 			for (int p = 0; p < 3; p++) fr.in[p] = uint8_t(held[p] | (extra ? extra[p] : 0));
 			fr.pokes.swap(pokes);
+			fr.work_pokes.swap(work_pokes);
 			g_plan.push_back(std::move(fr));
 		}
 	};
@@ -116,7 +117,53 @@ void load_script(const char *path)
 			unsigned n = 0; sscanf(line, "%*s %u", &n);
 			for (unsigned i = 0; i < n; i++) { uint8_t e[3] = { 0, uint8_t((i / 4) % 2 ? 0x02 : ((i / 4) % 3 ? 0x04 : 0x40)), 0 }; add(1, e); }
 		}
+		else if (w == "fight") {   // fight N SEED: both players play real moves and combos (vfscript's bot)
+			unsigned n = 0, seed = 0;
+			sscanf(line, "%*s %u %u", &n, &seed);
+			uint32_t rng = seed * 2654435761u + 7;
+			auto rnd = [&](int k) { rng = rng * 1103515245 + 12345; return int((rng >> 16) % unsigned(k)); };
+			enum : uint8_t { P = 0x01, K = 0x02, G = 0x04, D = 0x10, U = 0x20, F = 0x40, B = 0x80 };
+			struct step_t { uint8_t m; int frames; };
+			static const std::vector<std::vector<step_t>> PLAYS = {
+				{ { F, 14 } }, { { F, 2 }, { 0, 2 }, { F, 6 } },
+				{ { P, 3 }, { 0, 4 }, { P, 3 }, { 0, 4 }, { P, 3 }, { 0, 4 }, { K, 3 }, { 0, 10 } },
+				{ { P, 3 }, { 0, 4 }, { P, 3 }, { 0, 4 }, { P, 3 }, { 0, 8 } },
+				{ { P, 3 }, { 0, 4 }, { K, 3 }, { 0, 10 } },
+				{ { F | P, 3 }, { 0, 6 }, { F | K, 3 }, { 0, 10 } }, { { F | P, 3 }, { 0, 10 } },
+				{ { P | G, 4 }, { 0, 20 } }, { { F, 6 }, { P | G, 4 }, { 0, 20 } },
+				{ { D | K, 3 }, { 0, 12 } }, { { D | B | K, 3 }, { 0, 16 } },
+				{ { U | F, 3 }, { 0, 10 }, { K, 3 }, { 0, 24 } }, { { F | K, 3 }, { 0, 12 } },
+				{ { K, 3 }, { 0, 4 }, { K, 3 }, { 0, 10 } }, { { G, 18 } }, { { D | G, 14 } }, { { B, 10 } },
+			};
+			static const int WEIGHTS[] = { 5, 3, 7, 3, 5, 5, 3, 3, 3, 3, 2, 2, 3, 2, 5, 3, 2 };
+			int total = 0;
+			for (int wt : WEIGHTS) total += wt;
+			struct bot { const std::vector<step_t> *play = nullptr; size_t i = 0; int left = 0; uint8_t cur = 0; } bots[2];
+			for (unsigned fno = 0; fno < n; fno++) {
+				uint8_t e[3] = { 0, 0, 0 };
+				for (int p = 0; p < 2; p++) {
+					bot &bt = bots[p];
+					if (bt.left <= 0) {
+						if (bt.play && ++bt.i < bt.play->size()) { bt.cur = (*bt.play)[bt.i].m; bt.left = (*bt.play)[bt.i].frames; }
+						else if (bt.play) { bt.play = nullptr; bt.cur = 0; bt.left = 2 + rnd(7); }
+						else {
+							int r = rnd(total), k = 0;
+							while (r >= WEIGHTS[k]) r -= WEIGHTS[k++];
+							bt.play = &PLAYS[k]; bt.i = 0;
+							bt.cur = PLAYS[k][0].m; bt.left = PLAYS[k][0].frames + (k == 0 || k >= 14 ? rnd(12) : 0);
+						}
+					}
+					bt.left--;
+					uint8_t in = bt.cur & 0x37;
+					if (bt.cur & F) in |= p ? 0x80 : 0x40;
+					if (bt.cur & B) in |= p ? 0x40 : 0x80;
+					e[1 + p] = in;
+				}
+				add(1, e);
+			}
+		}
 		else if (w == "pokenv") pokes.push_back({ a, uint8_t(b) });
+		else if (w == "poke") work_pokes.push_back({ a, uint8_t(b) });   // poke ADDR VALUE (hex): a byte of work RAM (500000-53ffff)
 		else if (w == "rec") g_rec_from = g_plan.size();
 		else if (w == "stop") g_rec_to = g_plan.size();
 	}
@@ -208,6 +255,7 @@ hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const playe
 		const script_frame &fr = g_plan[g_plan_i++];
 		for (int i = 0; i < 3; i++) in[i] |= fr.in[i];
 		for (auto [addr, v] : fr.pokes) m.nvram()[(addr - 0x400000) & 0xffff] = v;
+		for (auto [addr, v] : fr.work_pokes) m.work_ram()[(addr - 0x500000) % m.work_ram().size()] = v;
 	}
 	for (int i = 0; i < 3; i++)
 		m.m_inputs[i] = uint8_t(~in[i]);
@@ -284,7 +332,7 @@ struct settings
 		num("scale", scale, 1, 6);
 		num("picture_shape", aspect, 0, 4);
 		num("volume", volume, 0, 100);
-		num("antialiasing", aa, 1, 3);
+		num("antialiasing", aa, 0, 3);   // 1 off, 0 Low (the 3D's edges smoothed), 2 and 3 drawn larger
 		num("music_volume", music, 0, 100);
 		num("effects_volume", effects, 0, 100);
 		num("screen_filter", filter, 0, 2);
@@ -394,6 +442,8 @@ std::string find_assets()
 
 int main(int argc, char **argv)
 {
+	// test runs (VF_HIDDEN): a background process on macOS, so no Dock icon appears for each one
+	if (getenv("VF_HIDDEN")) SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
 	std::string dir = "build/vf";
 	// a packaged build keeps its data next to the program
 	if (const char *base = SDL_GetBasePath()) {
@@ -473,6 +523,7 @@ int main(int argc, char **argv)
 	// already 10,576 x 3,072 and about 600 MB of buffers; more would fail on ordinary machines)
 	auto aa_fit = [](int scale, int aa) { return std::max(1, std::min(aa, 8 / scale)); };
 	m.set_render_scale(scale * aa_fit(scale, cfg.aa));   // antialiasing: drawn larger, averaged down
+	m.set_edge_aa(cfg.aa == 0);                           // or Low: the edges smoothed
 	m.set_smooth(true);   // always: a picture for each refresh of the screen, between the arcade's 57.5 frames a second
 	m.set_sky_filter(cfg.smooth_bg);
 	m.set_aspect(ASPECTS[aspect_i] > 0 ? ASPECTS[aspect_i] : 16.0f / 9.0f);
@@ -555,9 +606,11 @@ int main(int argc, char **argv)
 	if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) fprintf(stderr, "no sound: %s\n", SDL_GetError());
 	// the first window: 1366 x 768, or 16:9 within 90% of a smaller screen's usable area
 	int win_w = 1366, win_h = 768;
+	// testing: VF_WINDOW=WxH, the window's size in points (a hidden one as large as a player's screen)
+	const bool fixed_window = getenv("VF_WINDOW") && sscanf(getenv("VF_WINDOW"), "%dx%d", &win_w, &win_h) == 2;
 	{
 		SDL_Rect usable;
-		if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) && usable.w > 0 && usable.h > 0) {
+		if (!fixed_window && SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) && usable.w > 0 && usable.h > 0) {
 			const float k = std::min({ 1.0f, usable.w * 0.9f / win_w, usable.h * 0.9f / win_h });
 			win_w = int(win_w * k); win_h = int(win_h * k);
 		}
@@ -659,11 +712,13 @@ int main(int argc, char **argv)
 	int gpu_pictures = 0, gpu_checked = 0, gpu_differ = 0;
 	// the picture on screen, for a file: put together by the GPU, it's drawn whole again first
 	auto saved_frame = [&] { if (m.frame_unshown()) m.redraw(); return shown_frame(); };
+	bool curtain = false;                // this pass: the frame to show is a curtain shown during a held scene change
 	auto upload = [&] {
 		show_target = false;
-		// frame() put together in parts holds only the 3D (or a held scene's unshown picture): the
-		// picture on show, drawn whole, is what goes up
-		if (m.frame_unshown()) m.redraw();
+		// frame() put together in parts holds only the 3D, or a held scene's unshown picture: the
+		// picture on show, drawn whole, is what goes up (but a curtain shown during a hold is
+		// frame() as it is: redrawn, it was the scene before the hold, at the cost of a whole picture)
+		if (m.frame_unshown() && !curtain) m.redraw();
 		void *px; int pitch;
 		if (aa_now() > 1 && SDL_LockTexture(tex, nullptr, &px, &pitch)) {
 			aa_into(static_cast<uint32_t *>(px), size_t(pitch) / 4);
@@ -732,10 +787,15 @@ int main(int argc, char **argv)
 			// the lines want a couple of pixels each to show: they fade in from 1.5 to 3 per line
 			const float per_line = h / 384.0f;
 			const float depth = (crt ? 0.45f : 0.6f) * std::clamp((per_line - 1.5f) / 1.5f, 0.0f, 1.0f);
+			// The lines are a whole number of screen pixels apart: the picture's lines to the nearest,
+			// so every line looks the same. Sampled at a fraction of a line apart (the Deck's 800-pixel
+			// screen: 2.08 pixels a line), the pattern beat into uneven bands every dozen lines. At a
+			// whole number of pixels a line this is the picture's own lines, as before; two pixels a
+			// line: a bright row and a dark one.
+			const int period = std::max(1, int(std::lround(per_line)));
 			std::vector<float> row(h);
 			for (int y = 0; y < h; y++) {
-				float f = (y + 0.5f) / per_line;
-				f -= std::floor(f);
+				const float f = period == 2 ? float(y % 2) * 0.5f : (float(y % period) + 0.5f) / float(period);
 				row[y] = 1 - depth * (1 - std::sin(f * 3.14159265f));   // 1 mid-line, darker at its edges
 			}
 			auto glass_at = [&](int x, int y, float rgb[3]) {
@@ -821,7 +881,7 @@ int main(int argc, char **argv)
 	bool running = true, paused = false, show_frame = true;
 	pad_state pstate[2];
 	// F9: timings in the title bar (and on stderr) every 120 frames; a frame has 17.4 ms
-	struct perf_stats { bool show = false; int frames = 0, starved = 0; uint64_t emu = 0, emu_max = 0, present = 0, work = 0, shown = 0, since = SDL_GetTicksNS(); };
+	struct perf_stats { bool show = false; int frames = 0, starved = 0, held = 0; uint64_t emu = 0, emu_max = 0, present = 0, work = 0, shown = 0, since = SDL_GetTicksNS(); };
 	perf_stats perf{ cfg.timings || getenv("VF_PERF") != nullptr };
 	// The load governor (a CPU that can't keep up): when, for about 6 s, the pictures shown fall short
 	// of the screen's refresh while busy, the sound runs dry, or running the game, drawing and uploading
@@ -839,7 +899,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "menu: couldn't load assets/ui (the game runs without it)\n");
 	menu.set_footer(std::string("Virtua Fighter Recomp ") + VF_VERSION + (*VF_DATE ? std::string(" \u00b7 ") + VF_DATE : ""));
 	// a new scale or shape reallocates the picture: draw it again at once when the game is stopped
-	auto redraw_if_stopped = [&] { if (paused || menu.is_open()) { m.redraw(); still_dirty = true; } };
+	auto redraw_if_stopped = [&] { if (paused || menu.is_open()) { m.set_stopped(true); m.redraw(); m.set_stopped(false); still_dirty = true; } };
 	// Reset (the menu, F3): the menu closes, a paused game unpauses, and the screen goes black at
 	// once while the boot runs unseen (a few seconds on a slow machine), not the last picture held.
 	// the arcade settings as their page opened (and the ring): see arcade_page
@@ -867,6 +927,7 @@ int main(int argc, char **argv)
 		// the player's own choice starts the governor afresh (its 60-a-second limit included)
 		if (by_player) { smooth_gap_ns = 8333333; over_windows = 0; player_scale = player_aa = -1; }
 		m.set_render_scale(v * aa_fit(v, cfg.aa));
+		m.set_edge_aa(cfg.aa == 0);
 		m.set_smooth(true);
 		sync.reset();                          // a new picture size: show the next frame as it is
 		make_texture(); present_shape(); redraw_if_stopped();
@@ -891,9 +952,15 @@ int main(int argc, char **argv)
 			[&] { return std::to_string(cfg.scale) + "x"; },
 			[&](int d) { set_scale(std::clamp(cfg.scale + d, 1, 6)); } });
 		p.items.push_back({ "Antialiasing",
-			"Smooths jagged edges on the 3D. 2x and 3x look cleaner but take a lot more power; lower the render scale if the game slows down.",
-			[&] { return aa_now() == 1 ? std::string(cfg.aa > 1 ? "Off (too large here)" : "Off") : std::to_string(aa_now()) + "x"; },
-			[&](int d) { cfg.aa = std::clamp(cfg.aa + d, 1, 3); set_scale(cfg.scale); } });
+			"Smooths jagged edges on the 3D. Low smooths the edges for little cost; 2x and 3x draw the 3D larger and look cleanest, but take a lot more power (lower the render scale if the game slows down).",
+			[&] { return cfg.aa == 0 ? std::string("Low") : aa_now() == 1 ? std::string(cfg.aa > 1 ? "Off (too large here)" : "Off") : std::to_string(aa_now()) + "x"; },
+			[&](int d) {
+				static const int order[] = { 1, 0, 2, 3 };   // Off, Low, 2x, 3x
+				int i = 0;
+				while (i < 3 && order[i] != cfg.aa) i++;
+				cfg.aa = order[std::clamp(i + d, 0, 3)];
+				set_scale(cfg.scale);
+			} });
 		p.items.push_back({ "Picture shape",
 			"Fit the window fills any screen shape. The other shapes add black bars to keep their shape; 4:3 is the original arcade screen. (F6)",
 			[&] { return std::string(aspect_i ? ASPECT_NAMES[aspect_i] : "Fit the window"); },
@@ -1150,8 +1217,23 @@ int main(int argc, char **argv)
 	if (const char *k = getenv("VF_MENU_KEYS"))
 		for (std::string t, all = std::string(k) + ","; !all.empty(); all.erase(0, all.find(',') + 1))
 			if (!(t = all.substr(0, all.find(','))).empty()) test_keys.push_back(t);
+	// testing: VF_TRACE=file writes a line a pass (a refresh of the screen): when it started, the game
+	// frames run and their time, what was shown (N a new smooth picture, W one drawn whole, C a cut's
+	// hold keeping the last, H a scene change held, S none due, X stopped, F a frame shown without
+	// smooth motion) and its moment, the times to draw, put together on the GPU, upload and present,
+	// and the one-off work in it (tile maps decoded whole, layers drawn, stage skies built and scaled,
+	// backdrops padded, GPU textures made, pixels uploaded)
+	static FILE *trace = getenv("VF_TRACE") ? fopen(getenv("VF_TRACE"), "w") : nullptr;
+	struct trace_pass { char kind = 'S'; int due = 0; double now = -1; uint64_t emu = 0, draw = 0, compose = 0, upload = 0, present = 0; } tp;
+	const uint64_t trace_t0 = SDL_GetTicksNS();
+	if (trace) fprintf(trace, "# pass t_ms due frame emu draw compose upload present kind now hold tiles_full tiles_ms layers layers_ms sky_build sky_build_ms sky_scale sky_scale_ms padded tex_made up_kpx stopped hp1 hp2 replay live r1 r2 quads mode alpha list0 list1 px py pz edge_ms\n");
 	while (running) {
 		bool in_texture = false;           // this pass's picture is on the GPU already (or the last one stays)
+		curtain = false;
+		bool cut_hold = false;             // this pass's picture stays on purpose (a camera cut's hold)
+		bool curtain_on_gpu = false;       // a curtain shown during a hold, put together by the GPU
+		const uint64_t pass_t = SDL_GetTicksNS();
+		tp = trace_pass{};
 		const int64_t pass = frames_run++;   // counted in every run: VF_MENU_KEYS and VF_SHOT_AT work without VF_QUIT_AFTER
 		if (quit_after >= 0 && pass >= quit_after) {
 			write_png("build/host_last.png", saved_frame(), shown_w(), shown_h());
@@ -1297,9 +1379,23 @@ int main(int argc, char **argv)
 				if (q < frame_bytes * 3 / 2) low = int(std::ceil(QUEUED - double(q) / frame_bytes));
 			}
 			frame_clock += dt * rate;
+			m.set_parts_mode(gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale()));
 			int due = int(int64_t(std::floor(frame_clock)) - game_run);
-			if (due > 8) { due = 1; frame_clock = double(game_run + 1); }   // fell behind: don't race to catch up
-			due = std::max(due, low);
+			// A pass that came late (a scene change's work, the machine busy elsewhere) doesn't run
+			// the time it lost as frames back to back: that made the game, and smooth motion's
+			// pictures, race to catch up (a 50 ms pass ran 3 frames in one, the next picture three
+			// frames on). No more frames a pass than the screen's pace runs (one at 120 Hz, two at 60
+			// or 50, more under an FPS limit); the rest of the lost time is dropped and the clock
+			// carries on from there, its fraction kept, so the pictures go on at their pace. The
+			// sound's slack (QUEUED frames) covers it, and the 1% trim makes it up.
+			static double dt_avg = 1.0 / 120;
+			dt_avg += (std::min(dt, 0.1) - dt_avg) * 0.05;
+			const int pace = std::max(1, int(std::ceil(dt_avg * rate + 0.25)));
+			if (due > pace) {
+				frame_clock = double(game_run + pace) + (frame_clock - std::floor(frame_clock));
+				due = pace;
+			}
+			due = std::max(due, std::min(low, pace + 1));   // (the sound about to run dry: a frame more at most)
 			if (due > 0) frame_clock = std::max(frame_clock, double(game_run + due));
 			due = std::max(due, 0);
 			if (ff) { due = 8; frame_clock = double(game_run + due); }
@@ -1320,10 +1416,33 @@ int main(int argc, char **argv)
 				// With smooth motion a frame is only drawn when shown: while a scene change is held,
 				// draw it anyway so the hold sees the real picture (else it waits on black forever),
 				// though it isn't shown
-				if (m.smooth() && sync.holding()) m.render_smooth(double(m.frame_number()), false);
+				// (in parts when the GPU puts the pictures together: only the 3D drawn at the render scale)
+				bool probe_parts = false;
+				if (m.smooth() && sync.holding()) {
+					if (gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale()))
+						probe_parts = m.render_parts(double(m.frame_number()), parts, false) == 1;
+					else m.render_smooth(double(m.frame_number()), false);
+				}
 				const bool was_holding = sync.holding();
-				show_frame = sync.show(m) || show_frame;
-				if (was_holding && !sync.holding()) m.smooth_cut();    // a new scene: nothing to blend from
+				const bool show_it = sync.show(m);
+				// a curtain shown while the hold goes on: frame() as just drawn, or that picture put
+				// together by the GPU
+				if (show_it) {
+					curtain = sync.holding();
+					curtain_on_gpu = probe_parts && sync.holding() &&
+									 gc.draw(parts, m.frame_w(), m.frame_h(), m.render_scale() > 1 ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+				}
+				show_frame = show_it || show_frame;
+				// a new scene: nothing to blend from, unless both lists kept are its own (it was built
+				// after frames with no 3D, which forget the old scene's): then it moves from its first
+				// picture on, instead of standing still until a third list came
+				static uint64_t hold_from = 0;
+				if (!was_holding && sync.holding()) hold_from = m.frame_number();
+				if (was_holding && !sync.holding()) {
+					float sa; int older, newer;
+					m.smooth_state(sa, older, newer);
+					if (older < 0 || uint64_t(older) + 1 < hold_from) m.smooth_cut();
+				}
 				if (audio && !ff) {
 					if (SDL_GetAudioStreamQueued(audio) == 0) perf.starved++;   // the sound ran dry: a crackle
 					SDL_PutAudioStreamData(audio, m.m_audio_out.data(), int(m.m_audio_out.size() * 2));
@@ -1331,6 +1450,9 @@ int main(int argc, char **argv)
 				m.m_audio_out.clear();
 			}
 			frame_clock = std::min(frame_clock, double(game_run) + 0.999);   // (frames not run: the menu opened, a restart)
+			if (curtain_on_gpu) { show_target = in_texture = true; tp.kind = 'F'; }
+			tp.due = due;
+			if (due) tp.emu = SDL_GetTicksNS() - t0;
 			if (due) {
 				perf.emu += SDL_GetTicksNS() - t0;
 				perf.work += SDL_GetTicksNS() - t0;
@@ -1342,6 +1464,15 @@ int main(int argc, char **argv)
 			// and none while the window is minimised or hidden.
 			// The limit is a budget, not a minimum gap: a gap of 8 ms skipped about a third of a 120 Hz
 			// screen's refreshes (8.3 ms apart, give or take), so it showed 70-odd pictures, not 120.
+			// a stage's sky scaled on its threads and done, not yet in use: a band of it to the GPU
+			if (gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale())) {
+				model1::gpu_image pending;
+				if (m.sky_pending(pending)) {
+					const uint64_t tq = SDL_GetTicksNS();
+					gc.preload(pending);
+					tp.upload += SDL_GetTicksNS() - tq;
+				}
+			}
 			static double smooth_budget = 1;
 			static uint64_t budget_t = SDL_GetTicksNS();
 			{ const uint64_t bt = SDL_GetTicksNS();
@@ -1353,9 +1484,17 @@ int main(int argc, char **argv)
 				const double now = double(m.frame_number() - 1) + std::clamp(frame_clock - double(game_run), 0.0, 1.0);
 				const uint64_t tr = SDL_GetTicksNS();
 				const double t = std::min(now, double(m.frame_number()));
+				tp.now = t;
+				tp.kind = 'N';
 				if (gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale())) {
 					const int r = m.render_parts(t, parts);
-					if (r == 1 && gc.draw(parts, m.frame_w(), m.frame_h(), m.render_scale() > 1 ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST)) {
+					const uint64_t tc = SDL_GetTicksNS();
+					tp.draw = tc - tr;
+					if (r == 0) tp.kind = 'C';
+					else if (r == 2) tp.kind = 'W';
+					const bool composed = r == 1 && gc.draw(parts, m.frame_w(), m.frame_h(), m.render_scale() > 1 ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+					if (r == 1) tp.compose = SDL_GetTicksNS() - tc;
+					if (composed) {
 						show_target = in_texture = true;
 						++gpu_pictures;
 						if (gpu_verified < 3 && gpu_pictures == (gpu_verified == 0 ? 1 : gpu_verified == 1 ? 60 : 600)) {
@@ -1378,19 +1517,28 @@ int main(int argc, char **argv)
 								int n = 0;
 								for (size_t i = 0; i < back.size(); i++) n += back[i] != m.frame().data()[i];
 								gpu_checked++;
-								if (n) fprintf(stderr, "gpu check: picture %d: %d pixels differ\n", gpu_pictures, n);
+								if (n) fprintf(stderr, "gpu check: picture %d: %d pixels differ (frame %llu, moment %.4f)\n", gpu_pictures, n, (unsigned long long)m.frame_number(), t);
+								if (n && getenv("VF_GPU_CHECK_DUMP")) {   // testing: both pictures
+									char path[512];
+									snprintf(path, sizeof path, "%s/gpu_%d.png", getenv("VF_GPU_CHECK_DUMP"), gpu_pictures);
+									write_png(path, back.data(), m.frame_w(), m.frame_h());
+									snprintf(path, sizeof path, "%s/cpu_%d.png", getenv("VF_GPU_CHECK_DUMP"), gpu_pictures);
+									write_png(path, m.frame().data(), m.frame_w(), m.frame_h());
+								}
 								gpu_differ += n != 0;
 							}
 						}
-					} else if (r == 0) in_texture = true;   // (a cut's hold: the picture on show stays)
+					} else if (r == 0) in_texture = cut_hold = true;   // (a cut's hold: the picture on show stays)
 					else if (r == 1) {                        // the GPU failed: drawn whole, and at this scale from now on
 						fprintf(stderr, "pictures drawn on the CPU at %dx: the GPU couldn't put them together (%s)\n", m.render_scale(), SDL_GetError());
 						gpu_failed.insert(m.render_scale());
 						gc.reset();
 						m.redraw();
 					}
-				} else
-					m.render_smooth(t);
+				} else {
+					if (!m.render_smooth(t)) { tp.kind = 'C'; cut_hold = true; }
+					tp.draw = SDL_GetTicksNS() - tr;
+				}
 				perf.present += SDL_GetTicksNS() - tr;
 				perf.work += SDL_GetTicksNS() - tr;
 				show_frame = true;
@@ -1402,12 +1550,18 @@ int main(int argc, char **argv)
 			const uint64_t tu = SDL_GetTicksNS();
 			upload();
 			perf.work += SDL_GetTicksNS() - tu;
+			tp.upload = SDL_GetTicksNS() - tu;
+			if (tp.kind == 'S') tp.kind = 'F';
 		}
 		// the FPS (Display > Show FPS): new pictures shown, counted over half a second
 		{
 			static int shown = 0;
 			static uint64_t since = SDL_GetTicksNS();
-			if (show_frame_was_new) { shown++; perf.shown++; }
+			if (show_frame_was_new) perf.shown++;
+			// the counter: pictures shown a second, where a picture held on purpose (a scene change
+			// held until it's whole, a camera cut's hold) counts as shown: the screen kept its pace,
+			// and counting it as missed showed a drop to 80-odd at every scene change
+			if (show_frame_was_new || (!paused && !menu.is_open() && (sync.holding() || cut_hold))) shown++;
 			static const char *cap = getenv("VF_CAPTURE");
 			static int captured = 0;
 			if (cap && show_frame_was_new && g_plan_i >= g_rec_from && g_plan_i < g_rec_to) {
@@ -1458,14 +1612,36 @@ int main(int argc, char **argv)
 			}
 			SDL_SetRenderLogicalPresentation(ren, lw, lh, mode);
 		}
+		// a pass whose picture stays on purpose (a held scene change, a camera cut's hold): not one
+		// the governor counts as missed
+		if (!paused && !menu.is_open() && (sync.holding() || cut_hold)) perf.held++;
 		SDL_RenderPresent(ren);
+		if (trace) {
+			const bool stopped = paused || menu.is_open();
+			if (stopped) tp.kind = 'X';
+			else if (sync.holding() && tp.kind == 'S') tp.kind = 'H';
+			tp.present = SDL_GetTicksNS() - t1;
+			model1::work_trace &w = m.m_work;
+			auto nv16 = [&](uint32_t a) { return unsigned(m.nvram()[a] | m.nvram()[a + 1] << 8); };
+			float sa, place[3]; int s0, s1;
+			m.smooth_state(sa, s0, s1, place);
+			fprintf(trace, "%lld %.3f %d %llu %.3f %.3f %.3f %.3f %.3f %c %.4f %d %d %.3f %d %.3f %d %.3f %d %.3f %d %d %llu %d %u %u %u %u %u %u %d %u %.4f %d %d %.3f %.3f %.3f %.3f\n",
+					(long long)pass, (pass_t - trace_t0) / 1e6, tp.due, (unsigned long long)m.frame_number(), tp.emu / 1e6, tp.draw / 1e6,
+					tp.compose / 1e6, tp.upload / 1e6, tp.present / 1e6, tp.kind, tp.now, int(sync.holding()), w.tiles_full, w.tiles_ns / 1e6,
+					w.layers, w.layers_ns / 1e6, w.sky_build, w.sky_build_ns / 1e6, w.sky_scale, w.sky_scale_ns / 1e6, w.padded, gc.made,
+					(unsigned long long)(gc.uploaded / 1000), int(stopped), nv16(0xb4), nv16(0xb6), nv16(0x182) >> 15, nv16(0x202) >> 15,
+					unsigned(m.work_ram()[0x1281]), unsigned(m.work_ram()[0x1282]), int(m.frame_quads()), unsigned(m.game_mode()), sa, s0, s1, place[0], place[1], place[2], w.edge_ns / 1e6);
+			w = model1::work_trace{};
+			gc.made = 0; gc.uploaded = 0;
+		}
 		// Without vsync (forced off, or a minimised window) present returns at once: don't spin a core.
 		{ static uint64_t pass = SDL_GetTicksNS(); const uint64_t t = SDL_GetTicksNS();
 		  if (!hidden && t - pass < 2000000) SDL_DelayNS(2000000 - (t - pass));
 		  pass = SDL_GetTicksNS(); }
-		if (hidden) {                // tests: a hidden window may not wait for the screen; pace as 120 Hz
+		if (hidden) {                // tests: a hidden window may not wait for the screen; pace as 120 Hz (VF_HZ=n: n Hz)
 			static uint64_t next = SDL_GetTicksNS();
-			next += 8333333;
+			static const uint64_t period = uint64_t(1e9 / (getenv("VF_HZ") ? atof(getenv("VF_HZ")) : 120.0));
+			next += period;
 			const uint64_t t = SDL_GetTicksNS();
 			if (next > t) SDL_DelayNS(next - t); else next = t;
 		}
@@ -1503,7 +1679,7 @@ int main(int argc, char **argv)
 				SDL_SetWindowTitle(win, t);
 				fprintf(stderr, "%s\n", t);
 			}
-			if ((!hidden || getenv("VF_GOVERN")) && quit_after < 0 && !paused && !menu.is_open()) {
+			if (((!hidden && quit_after < 0) || getenv("VF_GOVERN")) && !paused && !menu.is_open()) {
 				const double secs = double(SDL_GetTicksNS() - perf.since) / 1e9;
 				const double busy = double(perf.work) / (secs * 1e9);   // CPU work, not the wait for the screen
 				// or short of pictures: fewer than 90% of what it aims for (the screen's refresh, 120 at
@@ -1511,20 +1687,27 @@ int main(int argc, char **argv)
 				float hz = 60;
 				if (const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(win)))
 					if (dm->refresh_rate > 0) hz = dm->refresh_rate;
-				const double aim = std::min<double>(hz, smooth_gap_ns < 16666666 ? 120 : 60);
+				if (hidden && getenv("VF_HZ")) hz = float(atof(getenv("VF_HZ")));
+				// what it aims for leaves out the passes that hold a picture on purpose: a scene change
+				// (up to 45 frames) or a camera cut isn't the machine falling behind
+				const double aim = std::min<double>(hz, smooth_gap_ns < 16666666 ? 120 : 60) * (1.0 - std::min(1.0, perf.held / 120.0));
 				const double fps = perf.shown / secs;
 				const bool short_of = m.smooth() && fps < aim * 0.9 && busy > 0.6;
 				// only what the player would notice: too few pictures, the sound running dry, or no
 				// time left at all (a busy CPU that still keeps up is left alone)
 				const bool dropouts = perf.starved > 0 && busy > 0.6;
-				over_windows = (short_of || dropouts || busy > 0.97) ? over_windows + 1 : 0;
+				// only steady play counts: a window with a scene change or a camera cut held in it (and
+				// the work around them) neither counts toward stepping down nor clears the count
+				if (perf.held == 0) over_windows = (short_of || dropouts || busy > 0.97) ? over_windows + 1 : 0;
+				if (trace) fprintf(trace, "# pass %lld governor window: busy %.0f%% shown %.0f/s aim %.0f starved %d over %d\n", (long long)frames_run, busy * 100, fps, aim, perf.starved, over_windows);
 				if (over_windows >= 3) {
 					over_windows = 0;
+					if (trace) fprintf(trace, "# pass %lld governor acts\n", (long long)frames_run);
 					if (player_scale < 0) { player_scale = cfg.scale; player_aa = cfg.aa; }
 					if (smooth_gap_ns < 16666666) {
 						smooth_gap_ns = 16666666;
 						fprintf(stderr, "load %.0f%%, %.0f FPS: smooth pictures limited to 60 a second\n", busy * 100, fps);
-					} else if (cfg.aa > 1) {
+					} else if (cfg.aa != 1) {
 						cfg.aa = 1; set_scale(cfg.scale, false);
 						fprintf(stderr, "load %.0f%%, %.0f FPS: antialiasing off\n", busy * 100, fps);
 					} else if (cfg.scale > 1) {

@@ -7,7 +7,9 @@
 //                 rec NAME | stop: video of what's between, 60 pictures per second of the game's
 //                 time, to NAME.mkv (lossless, ffmpeg), its sound to NAME.wav (VF_SOUND=1;
 //                 VF_MUSIC / VF_EFFECTS levels), and NAME.txt: each picture's moment in game frames
-//                 (VF_SMOOTH=1: smooth motion, as the game above 1x)
+//                 (VF_SMOOTH=1: smooth motion, as the game above 1x; VF_OUT=WxH scaled for an edit,
+//                 VF_OUT_FLAGS its ffmpeg scaler, lanczos by default; VF_LOG=file: a line a frame of
+//                 health, rounds won and round flags, for finding marks: tools/montage/vflog.py)
 //   PORT 0: coin1 01 coin2 02 test 04 service 08 start1 10 start2 20; PORT 1/2: players
 #include "../src/host/regions.h"
 #include "../src/host/png.h"
@@ -129,8 +131,8 @@ int main(int argc, char **argv)
 		// VF_OUT=WxH: scaled (lanczos) and encoded for the edit; otherwise lossless at the game's size
 		if (const char *o = getenv("VF_OUT"))
 			snprintf(cmdl, sizeof cmdl, "ffmpeg -v error -y -f rawvideo -pix_fmt bgra -s %dx%d -r 60 -i - "
-					 "-vf scale=%s:flags=lanczos -c:v libx264 -crf 12 -preset fast -pix_fmt yuv420p '%s.mkv'",
-					 m.frame_w(), m.frame_h(), o, base.c_str());
+					 "-vf scale=%s:flags=%s -c:v libx264 -crf 12 -preset fast -pix_fmt yuv420p '%s.mkv'",
+					 m.frame_w(), m.frame_h(), o, getenv("VF_OUT_FLAGS") ? getenv("VF_OUT_FLAGS") : "lanczos", base.c_str());
 		else
 			snprintf(cmdl, sizeof cmdl, "ffmpeg -v error -y -f rawvideo -pix_fmt bgra -s %dx%d -r 60 -i - "
 					 "-c:v libx264rgb -crf 0 -preset ultrafast '%s.mkv'", m.frame_w(), m.frame_h(), base.c_str());
@@ -159,6 +161,9 @@ int main(int argc, char **argv)
 	auto step = [&] {
 		m.run_frame();
 		fno++;
+		// as the game: with smooth motion a frame is only drawn when shown, so a held scene change
+		// is drawn anyway (not shown) for the hold to see the real picture
+		if (m.smooth() && sync.enabled && sync.holding()) m.render_smooth(double(m.frame_number()), false);
 		const size_t npx = size_t(m.frame_w()) * m.frame_h();
 		const bool was_holding = sync.holding();
 		const bool showing = sync.show(m);
@@ -215,11 +220,22 @@ int main(int argc, char **argv)
 			snprintf(path, sizeof path, "%s/sky_%06d.png", skydir, fno);
 			write_png(path, m.frame().data(), m.frame_w(), m.frame_h());
 		}
+		// VF_LOG=path: a line a frame for finding the edit's marks: the game frame, each fighter's health
+		// (0-192, battery RAM 4000b4 / 4000b6), two round flags (400182: 0 from the replay on; 400202: the
+		// round is live), the shown picture's polygon count and the rounds each has won (501281 / 501282)
+		static FILE *glog = getenv("VF_LOG") ? fopen(getenv("VF_LOG"), "w") : nullptr;
+		if (glog) {
+			auto nv16 = [&](uint32_t a) { return unsigned(m.nvram()[a] | m.nvram()[a + 1] << 8); };
+			fprintf(glog, "%d %u %u %u %u %u %d %u %u\n", fno, unsigned(m.frame_number()), nv16(0xb4), nv16(0xb6), nv16(0x182) >> 15, nv16(0x202) >> 15, int(m.frame_quads()), unsigned(m.work_ram()[0x1281]), unsigned(m.work_ram()[0x1282]));
+		}
 		static const char *dump_at = getenv("VF_DUMP_AT");      // VF_DUMP_AT=f1,f2: work RAM at those frames
 		if (dump_at)
 			for (const char *q = dump_at; *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : "")
 				if (atoi(q) == fno)
+{
 					save_blob(std::string(argv[3]) + "/ram_" + std::to_string(fno) + ".bin", m.work_ram().data(), m.work_ram().size());
+					save_blob(std::string(argv[3]) + "/ram_" + std::to_string(fno) + ".nv", m.nvram().data(), m.nvram().size());
+				}
 		for (auto &[a, b] : ranges)
 			if (fno >= a && fno <= b) {
 				char path[512];
