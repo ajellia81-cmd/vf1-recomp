@@ -360,8 +360,15 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
       </div></span>
     <span class="info"><button class="lnk" aria-expanded="false">Changelog</button>
       <div class="pop" role="dialog" aria-label="Changelog">
-        <p><b>v1.1.8</b> &middot; Oct 12 2026</p>
+        <p><b>v1.1.9</b> &middot; Oct 12 2026</p>
         <ul>
+          <li>Updating to a new version in a new folder no longer asks for your ROM again: the game keeps a copy in your user data folder.</li>
+          <li>Switching between PC and Arcade play takes effect straight away, and each keeps its own coin settings (Arcade has credits, PC is free play).</li>
+          <li>New <b>Coin</b> button for each player under Controls, for a cabinet's coin slot.</li>
+          <li>Clear a key or button binding: select it and press Delete (or Y on a pad).</li>
+          <li>Steam Deck and slower computers: the automatic quality drop no longer overreacts while the game starts up, and gives quality back once things settle.</li>
+        </ul>
+        <details><summary>v1.1.8</summary><ul>
           <li>Scene changes are smooth: no more slowdown or pause when a match starts, at a KO, a replay, the win pose or a camera cut, and KO slow motion no longer shows a picture twice.</li>
           <li>After a slow moment the game carries on instead of racing to catch up, and the automatic quality drop no longer mistakes scene changes for a slow computer.</li>
           <li>New antialiasing setting, <b>Low</b>: smooths the 3D's edges for a fraction of the cost of 2x.</li>
@@ -369,7 +376,7 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
           <li>Faster title and player select screens, and stage skies prepared in the background at high render scales.</li>
           <li>Scanlines and CRT are even at any screen size (no more banding on the Steam Deck).</li>
           <li>The FPS counter no longer dips at scene changes.</li>
-        </ul>
+        </ul></details>
         <details><summary>v1.1.7</summary><ul>
           <li>Smooth motion is now really smooth on 120 Hz and other high refresh rate screens: every picture shows its own moment, where before many repeated the one before.</li>
           <li>The sky moves smoothly with the camera instead of a pixel at a time.</li>
@@ -421,6 +428,7 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
   </nav>
 
   <p class="note">A fan-made static recompilation of Virtua Fighter (Sega Model 1, 1993): the arcade's own code is translated to native code on your machine, and the rest of the board is rebuilt around it. No ROMs or game files are included: you need your own copy. Not affiliated with or endorsed by SEGA. Unsigned: run it at your own risk.</p>
+  <p class="note">Made with the help of AI coding tools. Every build is checked frame by frame against the arcade (via MAME).</p>
 </main>
 <script>try{var r=document.referrer||"";if(!r||new URL(r).hostname!==location.hostname)fetch("/_refhit?r="+encodeURIComponent(r),{cache:"no-store",keepalive:true}).catch(function(){})}catch(e){}</script>
 

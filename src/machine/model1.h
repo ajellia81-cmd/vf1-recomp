@@ -73,7 +73,13 @@ public:
 	void tilemap_image(int l, std::vector<uint32_t> &out) { out.resize(512 * 512); m_tiles.update(m_pens); m_tiles.render_map(l, out.data()); }
 	// Sets the game's coin/credit setting to FREE PLAY in the real I/O board's EEPROM (read at
 	// boot: reset afterwards). False when it already was, or there are no settings yet.
-	bool force_free_play();
+	bool force_free_play() { return set_coin_setting(FREE_PLAY); }
+	// The coin/credit setting itself (word 8's high byte, then word 10's): -1 before the game has
+	// written its settings; set_ is false when nothing changed. 0: the game's own first setting
+	// (1 coin 1 credit, "CREDIT 0" on screen).
+	static constexpr int FREE_PLAY = 0x1901;
+	int coin_setting();
+	bool set_coin_setting(int v);
 	// The test mode's GAME ASSIGNMENTS, in the same EEPROM (read at boot: reset after a change).
 	// -1 when the game hasn't written its settings yet; set_ is false when nothing changed.
 	enum class game_assignment { match_1p, match_vs, difficulty, advertise_sound, continues };
@@ -87,6 +93,7 @@ public:
 	// Blanks the FREE PLAY notices (the attract/title one and the fight's): for the PC build,
 	// which is always free play. Returns how many it found.
 	int hide_free_play_text();
+	void show_free_play_text();          // (puts back what hide_free_play_text changed)
 	// Hi-res replacements for the stage skies (model1_sky.cpp), drawn above 1x. The names are
 	// the background export's (stage_<name>.png); false for a name it doesn't know.
 	static std::vector<std::string> sky_names();

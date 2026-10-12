@@ -16,6 +16,7 @@ struct menu_item
 	std::function<void(int)> change;      // Left / Right: -1 / +1 (choices)
 	std::function<void()> activate;       // Enter / A / a click (buttons)
 	bool info = false;                    // a line of text: not selectable
+	std::function<void()> clear;          // Delete / Y: back to none (a key or button binding)
 };
 
 struct menu_page
@@ -70,5 +71,6 @@ private:
 	void select(int i);
 	void change(int d);
 	void activate();
+	void clear();
 	friend struct menu_listener;
 };

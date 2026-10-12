@@ -471,12 +471,24 @@ static bool edit_settings(uint16_t *ioboard, uint8_t *standin, F edit)
 	return true;
 }
 
-bool model1::force_free_play()
+int model1::coin_setting()
 {
-	return edit_settings(m_ioboard ? m_ioboard->eeprom : nullptr, m_ioboard ? nullptr : eeprom(), [](uint16_t *e) {
-		if ((e[8] >> 8) == 0x19) return false;
-		e[8] = uint16_t((e[8] & 0x00ff) | 0x1900);
-		e[10] = uint16_t((e[10] & 0x00ff) | 0x0100);
+	int v = -1;
+	edit_settings(m_ioboard ? m_ioboard->eeprom : nullptr, m_ioboard ? nullptr : eeprom(), [&](uint16_t *e) {
+		v = (e[8] & 0xff00) | (e[10] >> 8);
+		return false;
+	});
+	return v;
+}
+
+// (both bytes: a coin setting of #26 with word 10's left as it was isn't free play, and was taken
+// for it, so PC mode kept the credits)
+bool model1::set_coin_setting(int v)
+{
+	return edit_settings(m_ioboard ? m_ioboard->eeprom : nullptr, m_ioboard ? nullptr : eeprom(), [&](uint16_t *e) {
+		if (((e[8] & 0xff00) | (e[10] >> 8)) == v) return false;
+		e[8] = uint16_t((e[8] & 0x00ff) | (v & 0xff00));
+		e[10] = uint16_t((e[10] & 0x00ff) | ((v & 0xff) << 8));
 		return true;
 	});
 }
@@ -534,8 +546,23 @@ bool model1::set_ring_width(int width)
 	return true;
 }
 
+static std::vector<std::pair<uint32_t, std::vector<uint8_t>>> s_free_play_text;   // the bytes hide_free_play_text replaced
+
+void model1::show_free_play_text()
+{
+	for (const auto &[addr, bytes] : s_free_play_text) memcpy(&m_regions.maincpu[addr], bytes.data(), bytes.size());
+	s_free_play_text.clear();
+}
+
 int model1::hide_free_play_text()
 {
+	if (!s_free_play_text.empty()) return 0;
+	auto keep = [&](uint32_t addr, size_t n) {
+		auto &rom = m_regions.maincpu;
+		if (addr + n <= rom.size()) s_free_play_text.push_back({ addr, std::vector<uint8_t>(&rom[addr], &rom[addr] + n) });
+	};
+	keep(0x13c01c2, 40);
+	keep(0xfd080f, 9);
 	int found = 0;
 	// The italic FREE PLAY (attract, title): a 14x2 tile image drawn by the routine at ff39a3
 	// from a record (base tile, flags, rows, columns, then a byte per tile). Base tile 0x0020,

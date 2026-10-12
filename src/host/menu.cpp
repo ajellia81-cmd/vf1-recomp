@@ -239,6 +239,16 @@ void game_menu::change(int d)
 	refresh();
 }
 
+// A binding back to none: Delete on a keyboard, Y on a pad, with its row selected (not Esc or
+// Backspace, which go back a page, nor B)
+void game_menu::clear()
+{
+	auto f = m_stack.back().items[m_sel].clear;
+	if (!f) return;
+	f();
+	refresh();
+}
+
 void game_menu::activate()
 {
 	const menu_item &it = m_stack.back().items[m_sel];
@@ -284,6 +294,9 @@ bool game_menu::handle_event(const SDL_Event &e)
 		case SDL_SCANCODE_ESCAPE: case SDL_SCANCODE_BACKSPACE:
 			if (!e.key.repeat) pop();
 			break;
+		case SDL_SCANCODE_DELETE:
+			if (!e.key.repeat) clear();
+			break;
 		default: break;
 		}
 		return true;
@@ -297,6 +310,7 @@ bool game_menu::handle_event(const SDL_Event &e)
 		case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: change(+1); break;
 		case SDL_GAMEPAD_BUTTON_SOUTH: activate(); break;
 		case SDL_GAMEPAD_BUTTON_EAST: pop(); break;
+		case SDL_GAMEPAD_BUTTON_NORTH: clear(); break;
 		case SDL_GAMEPAD_BUTTON_START: case SDL_GAMEPAD_BUTTON_BACK: case SDL_GAMEPAD_BUTTON_GUIDE: close(); break;
 		default: break;
 		}

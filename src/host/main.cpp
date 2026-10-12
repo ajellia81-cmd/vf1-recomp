@@ -176,14 +176,14 @@ hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const playe
 {
 	static const uint8_t BITS[C_COUNT] = {
 		PL_UP, PL_DOWN, PL_LEFT, PL_RIGHT, PL_GUARD, PL_PUNCH, PL_KICK,
-		PL_GUARD | PL_PUNCH, PL_PUNCH | PL_KICK, PL_GUARD | PL_KICK, PL_GUARD | PL_PUNCH | PL_KICK, 0 };
+		PL_GUARD | PL_PUNCH, PL_PUNCH | PL_KICK, PL_GUARD | PL_KICK, PL_GUARD | PL_PUNCH | PL_KICK, 0, 0 };
 	uint8_t in[3] = { 0, 0, 0 };  // pressed bits, inverted at the end
 	const bool *ks = SDL_GetKeyboardState(nullptr);
 	for (const auto &k : SYS_KEYS)
 		if (ks[k.key]) in[k.port] |= k.bit;
 	auto key = [&](SDL_Scancode k) { return k != SDL_SCANCODE_UNKNOWN && ks[k]; };
 	hotkey hk = hotkey::none;
-	static bool key_start_was[2];
+	static bool key_start_was[2], key_coin_was[2], pad_coin_was[2];
 	for (int p = 0; p < 2; p++) {
 		pad_state &st = ps[p];
 		auto press_start = [&] {
@@ -195,6 +195,11 @@ hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const playe
 		const bool kstart = key(ctl[p].key[C_START]);
 		if (kstart && !key_start_was[p]) press_start();
 		key_start_was[p] = kstart;
+		// Coin (a cabinet's coin slot, mapped in the menu): a coin for this player, in Arcade mode
+		// (PC mode is free play: the game takes no coins)
+		const bool kcoin = key(ctl[p].key[C_COIN]);
+		if (kcoin && !key_coin_was[p] && !g_pc_mode) st.coin_frames = 6;
+		key_coin_was[p] = kcoin;
 
 		const uint8_t coin_bit = p ? IN0_COIN2 : IN0_COIN1, start_bit = p ? IN0_START2 : IN0_START1;
 		if (SDL_Gamepad *g = pads[p]) {
@@ -204,6 +209,9 @@ hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const playe
 			const int dead = 12000;
 			const bool back = btn(SDL_GAMEPAD_BUTTON_BACK);
 			const bool start = player_controls::pad_down(g, ctl[p].pad[C_START]);
+			const bool pcoin = player_controls::pad_down(g, ctl[p].pad[C_COIN]);
+			if (pcoin && !pad_coin_was[p] && !g_pc_mode) st.coin_frames = 6;
+			pad_coin_was[p] = pcoin;
 			if (btn(SDL_GAMEPAD_BUTTON_DPAD_UP) || ly < -dead) b |= PL_UP;
 			if (btn(SDL_GAMEPAD_BUTTON_DPAD_DOWN) || ly > dead) b |= PL_DOWN;
 			if (btn(SDL_GAMEPAD_BUTTON_DPAD_LEFT) || lx < -dead) b |= PL_LEFT;
@@ -312,6 +320,7 @@ bool save_blob(const std::string &path, const uint8_t *src, size_t n)
 struct settings
 {
 	int scale = 2, aspect = 0, volume = 100, music = 100, effects = 100, aa = 1, filter = 0, ring = 0;
+	int arcade_coin = -1;   // Arcade mode's coin/credit setting, kept while PC mode makes it free play (-1: not seen yet)
 	bool fullscreen = false, timings = false, arcade = false, smooth_bg = false, show_fps = false;
 	player_controls ctl[2] = { player_controls::defaults(0), player_controls::defaults(1) };
 
@@ -343,6 +352,7 @@ struct settings
 		flag("arcade_mode", arcade);
 		flag("background_filter", smooth_bg);
 		flag("show_fps", show_fps);
+		num("arcade_coins", arcade_coin, -1, 0xffff);
 		for (int p = 0; p < 2; p++) ctl[p].load(kv, p);
 	}
 
@@ -355,6 +365,7 @@ struct settings
 		fprintf(f, "scale = %d\npicture_shape = %d\nfullscreen = %d\nframe_timings = %d\nvolume = %d\narcade_mode = %d\n"
 				"background_filter = %d\nmusic_volume = %d\neffects_volume = %d\nantialiasing = %d\nshow_fps = %d\nscreen_filter = %d\nring_size = %d\n", scale, aspect,
 				int(fullscreen), int(timings), volume, int(arcade), int(smooth_bg), music, effects, aa, int(show_fps), filter, ring);
+		if (arcade_coin >= 0) fprintf(f, "arcade_coins = %d\n", arcade_coin);
 		for (int p = 0; p < 2; p++) ctl[p].save(f, p);
 		const bool flushed = flush_to_disk(f);
 		if (fclose(f) == 0 && flushed) replace_file(path, tmp);
@@ -367,24 +378,73 @@ struct settings
 // beside it (the real I/O board's program) comes along too; without it the stand-in board runs.
 // Only those two zips are ever read, so a roms folder shared with other games, or a wrong pick,
 // can't get in the way. Returns false if they cancel (or there's no way to pick a file).
-bool first_launch(const std::string &data, model1::regions &out)
+// A folder of its own (a "roms" folder next to the program: the Steam Deck's, a portable Windows
+// one) is new with each update unpacked somewhere new, so the zips are kept in the player's data
+// folder too (`keep`: SDL's pref path) and looked for there when the folder's own roms/ has none:
+// an update no longer asks for the game again.
+// A file copied whole: to a temporary name, then renamed (std::filesystem::copy_file left an empty
+// file in Valve's container on a shared folder, and a cut-short copy mustn't look like a set)
+static bool copy_whole(const std::filesystem::path &from, const std::filesystem::path &to, std::string &why)
+{
+	FILE *in = fopen(from.string().c_str(), "rb");
+	if (!in) { why = "can't read " + from.string(); return false; }
+	const std::filesystem::path tmp = to.string() + ".tmp";
+	FILE *out = fopen(tmp.string().c_str(), "wb");
+	if (!out) { fclose(in); why = "can't write " + tmp.string(); return false; }
+	std::vector<char> buf(1 << 20);
+	bool ok = true;
+	for (size_t n; (n = fread(buf.data(), 1, buf.size(), in)) > 0;)
+		if (fwrite(buf.data(), 1, n, out) != n) { ok = false; break; }
+	ok = ok && !ferror(in);
+	fclose(in);
+	ok = (fclose(out) == 0) && ok;
+	if (ok) ok = replace_file(to.string(), tmp.string());
+	else { std::error_code ec; std::filesystem::remove(tmp, ec); }
+	if (!ok) why = "couldn't write " + to.string();
+	return ok;
+}
+
+bool first_launch(const std::string &data, const std::string &keep, model1::regions &out)
 {
 	namespace fs = std::filesystem;
 	const fs::path roms = fs::path(data) / "roms";
-	auto zips_here = [&] {
+	const fs::path kept = keep.empty() ? roms : fs::path(keep) / "roms";
+	auto zips_in = [&](const fs::path &dir) {
 		std::vector<std::string> z;
 		std::error_code ec;
 		for (const char *name : { "vf.zip", "model1io.zip" })
-			if (fs::is_regular_file(roms / name, ec)) z.push_back((roms / name).string());
+			if (fs::is_regular_file(dir / name, ec)) z.push_back((dir / name).string());
 		return z;
+	};
+	auto zips_here = [&] { return zips_in(roms); };
+	// a copy kept for the next update (when it isn't there already, or is another set)
+	auto keep_copy = [&] {
+		if (kept == roms) return;
+		std::error_code ec;
+		fs::create_directories(kept, ec);
+		for (const char *name : { "vf.zip", "model1io.zip" }) {
+			if (!fs::is_regular_file(roms / name, ec)) continue;
+			if (fs::is_regular_file(kept / name, ec) && fs::file_size(kept / name, ec) == fs::file_size(roms / name, ec)) continue;
+			std::string why;
+			if (!copy_whole(roms / name, kept / name, why)) fprintf(stderr, "couldn't keep a copy of %s: %s\n", name, why.c_str());
+		}
 	};
 	std::vector<std::string> have = zips_here();
 	std::string problem;
 	if (!have.empty()) {
 		romset::result r = romset::load(have);
-		if (r.ok) { out = std::move(r.regions); return true; }
+		if (r.ok) { keep_copy(); out = std::move(r.regions); return true; }
 		problem = r.error + "\n\n";
+	} else if (kept != roms) {
+		// an update in a new folder: the set kept from before
+		std::vector<std::string> before = zips_in(kept);
+		if (!before.empty()) {
+			romset::result r = romset::load(before);
+			if (r.ok) { fprintf(stderr, "the game from %s\n", kept.string().c_str()); out = std::move(r.regions); return true; }
+			fprintf(stderr, "the game kept in %s: %s\n", kept.string().c_str(), r.error.c_str());
+		}
 	}
+	if (getenv("VF_HIDDEN")) { fprintf(stderr, "no game found in %s (hidden: no picker)\n", roms.string().c_str()); return false; }   // testing
 	SDL_Init(SDL_INIT_VIDEO);
 	const std::string where = "It's copied into " + roms.string() + ", so you only do this once.";
 	std::string note = problem + "Choose your copy of Virtua Fighter: MAME's \"vf\" set (vf.zip).\n\n" + where;
@@ -415,15 +475,15 @@ bool first_launch(const std::string &data, model1::regions &out)
 		}
 		std::error_code ec;
 		fs::create_directories(roms, ec);
-		fs::copy_file(f, roms / "vf.zip", fs::copy_options::overwrite_existing, ec);
-		if (ec) {
-			note = "Couldn't copy it into " + roms.string() + ": " + ec.message() + "\n\nChoose your vf.zip.";
+		std::string why;
+		if (!copy_whole(f, roms / "vf.zip", why)) {
+			note = "Couldn't copy it into " + roms.string() + ": " + why + "\n\nChoose your vf.zip.";
 			continue;
 		}
 		const fs::path io = fs::path(f).parent_path() / "model1io.zip";    // its neighbour, if any
-		if (fs::exists(io, ec)) fs::copy_file(io, roms / "model1io.zip", fs::copy_options::overwrite_existing, ec);
+		if (fs::exists(io, ec)) copy_whole(io, roms / "model1io.zip", why);
 		romset::result r = romset::load(zips_here());
-		if (r.ok) { out = std::move(r.regions); return true; }
+		if (r.ok) { keep_copy(); out = std::move(r.regions); return true; }
 		note = r.error + "\n\nChoose MAME's \"vf\" set (vf.zip).";
 	}
 }
@@ -485,10 +545,14 @@ int main(int argc, char **argv)
 			const char *base = SDL_GetBasePath();
 			const std::string here = base ? std::string(base) : std::string();
 			char *pref = SDL_GetPrefPath(nullptr, "Virtua Fighter Recomp");
+			std::string keep = pref ? pref : "";                                 // (the zips kept across updates)
+			if (getenv("VF_DATA")) keep.clear();                                 // (testing: the player's own left alone)
+			if (const char *k = getenv("VF_KEEP")) keep = k;                    // testing: another user's data folder
 			if (getenv("VF_DATA")) dir = getenv("VF_DATA");                     // testing
 			else if (!here.empty() && std::filesystem::is_directory(here + "roms", ec)) dir = here;
 			else dir = pref ? pref : ".";
 			SDL_free(pref);
+			while (!keep.empty() && keep.back() == '/') keep.pop_back();
 			while (!dir.empty() && dir.back() == '/') dir.pop_back();
 			// A player's build has no console (a Mac app, a Windows GUI program, a Steam shortcut):
 			// its messages go to log.txt in the data folder instead, for when something goes wrong.
@@ -497,7 +561,7 @@ int main(int argc, char **argv)
 				freopen((dir + "/log.txt").c_str(), "w", stderr);
 				setvbuf(stderr, nullptr, _IONBF, 0);
 			}
-			if (!first_launch(dir, game)) return 0;
+			if (!first_launch(dir, keep == dir ? std::string() : keep, game)) return 0;
 		}
 	}
 	const std::string settings_path = dir + "/settings.ini";
@@ -582,11 +646,30 @@ int main(int argc, char **argv)
 	};
 	load_backgrounds(m, find_assets() + "/backgrounds");   // the title and select's widescreen sides
 	load_backgrounds(m, dir + "/backgrounds");   // the player's own (hi-res stage skies...), which win
-	if (g_pc_mode) m.hide_free_play_text();
 	m.set_ring_width(cfg.ring);
+	// The play style's coins: PC mode is free play (its FREE PLAY text hidden); Arcade mode has the
+	// cabinet's own coin setting, kept in settings.ini while PC mode has free play in its place (it
+	// was left at free play, so Arcade mode after PC mode had no credits to put in, and a cabinet's
+	// coin slot did nothing). The settings are read at boot: when they change, boot again.
+	auto settle_coins = [&]() -> bool {
+		const int now = m.coin_setting();
+		if (now < 0) return false;                       // (the game's very first boot writes them)
+		if (g_pc_mode) {
+			if (now != model1::FREE_PLAY && now != cfg.arcade_coin) { cfg.arcade_coin = now; cfg_dirty = true; }
+			return m.force_free_play();
+		}
+		// Arcade: its own setting back; free play left by PC mode before one was kept: the game's first
+		return m.set_coin_setting(cfg.arcade_coin >= 0 ? cfg.arcade_coin : now == model1::FREE_PLAY ? 0 : now);
+	};
+	// Arcade mode's setting as it is now (the service menu may have changed it), kept for when PC mode replaces it
+	auto keep_arcade_coins = [&] {
+		const int now = m.coin_setting();
+		if (!g_pc_mode && now >= 0 && now != cfg.arcade_coin) { cfg.arcade_coin = now; cfg_dirty = true; }
+	};
+	auto apply_play_style = [&] { if (g_pc_mode) m.hide_free_play_text(); else m.show_free_play_text(); };
+	apply_play_style();
 	boot();
-	// the settings are read at boot: if free play had to be switched on, boot again with it
-	if (g_pc_mode && m.force_free_play()) boot();
+	if (settle_coins()) boot();
 
 	// Video is a must (with a message if it fails: a player's build has no console); sound and
 	// pads aren't: without a sound device the game keeps time by the clock.
@@ -887,11 +970,34 @@ int main(int argc, char **argv)
 	// of the screen's refresh while busy, the sound runs dry, or running the game, drawing and uploading
 	// (not the wait for the screen) take over 97% of the time: first draw no more than 60 smooth
 	// pictures a second (not one per refresh of a 120 or 144 Hz screen), then drop antialiasing, then
-	// the render scale a step. It never raises them again; the player's own change starts it afresh.
-	// Not in tests.
+	// the render scale a step. Nothing is judged in the first 10 s on show (the start is far busier
+	// than the rest: on a Steam Deck VF2's went from 3x to 1x then and stayed), and after 10 s of calm
+	// (all the pictures, busy under 55%) what it lowered goes back up a step towards the player's
+	// (not again in this run if that step is lowered once more). The player's own change starts it
+	// afresh. Not in tests (VF_GOVERN: in tests too; VF_TEST_LOAD=ms:s, each pass ms longer a frame
+	// at 3x, by the scale's square, for the first s seconds: a slow start).
 	int player_scale = -1, player_aa = -1;   // the player's own, while the governor has lowered them
 	uint64_t smooth_gap_ns = 8333333;    // smooth pictures: at most one per this, on average (120/s)
 	int over_windows = 0;
+	uint64_t gov_from = 0;                // judged from (10 s after the first picture)
+	int gov_calm = 0;                     // calm windows in a row
+	bool gov_raised = false, gov_no_raise = false;
+	double test_load_ms = 0, test_load_s = 0;
+	if (const char *tl = getenv("VF_TEST_LOAD")) sscanf(tl, "%lf:%lf", &test_load_ms, &test_load_s);
+	// The render state in use, to the log: at the start and at each change (the player's or the governor's)
+	auto log_state = [&](const char *why) {
+		int vsync = 0, pw = 0, ph = 0;
+		SDL_GetRenderVSync(ren, &vsync);
+		SDL_GetWindowSizeInPixels(win, &pw, &ph);
+		float hz = 0;
+		if (const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(win))) hz = dm->refresh_rate;
+		const char *rn = SDL_GetRendererName(ren);
+		fprintf(stderr, "render state (%s): %dx (drawn at %dx), antialiasing %s, %s, the 2D on the %s (%s), smooth pictures %s, governor %s, vsync %d, screen %.2f Hz, window %d x %d\n",
+				why, cfg.scale, m.render_scale(), cfg.aa == 0 ? "Low" : aa_now() > 1 ? (aa_now() == 2 ? "2x" : "3x") : "off",
+				aspect_i ? ASPECT_NAMES[aspect_i] : "fit", gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale()) ? "GPU" : "CPU",
+				rn ? rn : "?", smooth_gap_ns < 16666666 ? "each refresh" : "60 a second",
+				((!getenv("VF_HIDDEN") && !getenv("VF_QUIT_AFTER")) || getenv("VF_GOVERN")) ? "on" : "off", vsync, hz, pw, ph);
+	};
 
 	// ---- the menu (Esc, or View on a pad) ----
 	game_menu menu;
@@ -904,15 +1010,16 @@ int main(int argc, char **argv)
 	// once while the boot runs unseen (a few seconds on a slow machine), not the last picture held.
 	// the arcade settings as their page opened (and the ring): see arcade_page
 	std::optional<std::array<int, 6>> assign_before;
-	auto reset_game = [&] {
+	auto reset_game = [&](bool keep_coins = true) {
 		assign_before.reset();   // a restart applies them
+		if (keep_coins) keep_arcade_coins();     // (Arcade: as the service menu may have left them)
 		menu.close();
 		paused = false;
 		SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
 		SDL_RenderClear(ren);
 		SDL_RenderPresent(ren);
 		boot();
-		if (g_pc_mode && m.force_free_play()) boot();   // the service menu may have set coins
+		if (settle_coins()) boot();   // (the service menu may have set coins)
 		make_texture();
 		show_frame = false;
 	};
@@ -925,12 +1032,13 @@ int main(int argc, char **argv)
 	auto set_scale = [&](int v, bool by_player = true) {
 		cfg.scale = v; cfg_dirty = true;
 		// the player's own choice starts the governor afresh (its 60-a-second limit included)
-		if (by_player) { smooth_gap_ns = 8333333; over_windows = 0; player_scale = player_aa = -1; }
+		if (by_player) { smooth_gap_ns = 8333333; over_windows = 0; player_scale = player_aa = -1; gov_calm = 0; gov_raised = gov_no_raise = false; }
 		m.set_render_scale(v * aa_fit(v, cfg.aa));
 		m.set_edge_aa(cfg.aa == 0);
 		m.set_smooth(true);
 		sync.reset();                          // a new picture size: show the next frame as it is
 		make_texture(); present_shape(); redraw_if_stopped();
+		log_state(by_player ? "the player's scale or antialiasing" : "the governor's");
 	};
 	auto set_shape = [&](int v) {
 		aspect_i = cfg.aspect = v; cfg_dirty = true;
@@ -1008,9 +1116,14 @@ int main(int argc, char **argv)
 	auto game_page = [&] {
 		menu_page p{ "Game", "", {} };
 		p.items.push_back({ "Play style",
-			"PC skips the boot screen and is always free play. Arcade has the boot screen, coins and credits, like the real cabinet. Fully applies the next time you start the game.",
+			"PC skips the boot screen and is always free play. Arcade has the boot screen, coins and credits, like the real cabinet (its coin settings are kept for it). Changing it restarts the game.",
 			[&] { return std::string(cfg.arcade ? "Arcade" : "PC"); },
-			[&](int) { cfg.arcade = !cfg.arcade; g_pc_mode = !cfg.arcade; cfg_dirty = true; } });
+			[&](int) {
+				keep_arcade_coins();
+				cfg.arcade = !cfg.arcade; g_pc_mode = !cfg.arcade; cfg_dirty = true;
+				apply_play_style();
+				reset_game(false);   // (kept above, in the style it was)
+			} });
 		p.items.push_back({ "Reset game",
 			"Restarts the game, like switching the arcade off and on. Rankings and settings are kept. (F3)",
 			{}, {}, [&] { reset_game(); } });
@@ -1090,14 +1203,16 @@ int main(int argc, char **argv)
 	auto keys_page = [&](int p) {
 		menu_page pg{ p ? "Player 2 keyboard" : "Player 1 keyboard", "", {} };
 		for (int a = 0; a < C_COUNT; a++)
-			pg.items.push_back({ CONTROL_NAMES[a], "Select, then press the key to use. Backspace clears it, Esc keeps it.",
+			pg.items.push_back({ CONTROL_NAMES[a], a == C_COIN
+					? "A coin for this player in Arcade mode (a cabinet's coin slot). Select, then press the key to use. Delete clears it."
+					: "Select, then press the key to use. Delete clears it.",
 				[&, p, a] { return key_name(cfg.ctl[p].key[a]); }, {},
 				[&, p, a] {
 					menu.capture(std::string("Press a key for ") + CONTROL_NAMES[a] + (p ? " (player 2)" : " (player 1)") +
-								 ". Backspace clears it, Esc keeps it.",
+								 ". Backspace or Delete clears it, Esc keeps it.",
 						[&, p, a](const SDL_Event &e) {
 							if (e.type != SDL_EVENT_KEY_DOWN) return false;
-							const SDL_Scancode k = e.key.scancode == SDL_SCANCODE_BACKSPACE ? SDL_SCANCODE_UNKNOWN : e.key.scancode;
+							const SDL_Scancode k = e.key.scancode == SDL_SCANCODE_BACKSPACE || e.key.scancode == SDL_SCANCODE_DELETE ? SDL_SCANCODE_UNKNOWN : e.key.scancode;
 							// the game's own keys (pause, reset, the menu's shortcuts, the cabinet's coin and
 							// test buttons) stay theirs: wait for another key
 							static const SDL_Scancode RESERVED[] = { SDL_SCANCODE_P, SDL_SCANCODE_TAB, SDL_SCANCODE_F3,
@@ -1110,21 +1225,28 @@ int main(int argc, char **argv)
 							cfg_dirty = true;
 							return true;
 						});
-				} });
+				}, false, [&, p, a] { cfg.ctl[p].key[a] = SDL_SCANCODE_UNKNOWN; cfg_dirty = true; } });
 		pg.items.push_back(back_item());
 		return pg;
 	};
 	auto pad_buttons_page = [&](int p) {
 		menu_page pg{ p ? "Player 2 pad buttons" : "Player 1 pad buttons", "", {} };
 		for (int a = C_GUARD; a < C_COUNT; a++)
-			pg.items.push_back({ CONTROL_NAMES[a], "Select, then press the button (or trigger) to use. View or Esc keeps it. "
+			pg.items.push_back({ CONTROL_NAMES[a], std::string(a == C_COIN ? "A coin for this player in Arcade mode (a cabinet's coin slot). " : "") +
+												   "Select, then press the button (or trigger) to use. Y (or Delete) clears it. "
 												   "The d-pad and left stick always move.",
 				[&, p, a] { return player_controls::pad_label(cfg.ctl[p].pad[a]); }, {},
 				[&, p, a] {
 					menu.capture(std::string("Press a pad button for ") + CONTROL_NAMES[a] + (p ? " (player 2)" : " (player 1)") +
-								 ". View or Esc keeps it.",
+								 ". View or Esc keeps it; Delete clears it.",
 						[&, p, a](const SDL_Event &e) {
 							int code = PAD_NONE;
+							if (e.type == SDL_EVENT_KEY_DOWN) {
+								if (e.key.scancode != SDL_SCANCODE_DELETE && e.key.scancode != SDL_SCANCODE_BACKSPACE) return false;
+								cfg.ctl[p].pad[a] = PAD_NONE;
+								cfg_dirty = true;
+								return true;
+							}
 							if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
 								if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) return true;     // View: keep it
 								code = e.gbutton.button;
@@ -1137,7 +1259,7 @@ int main(int argc, char **argv)
 							cfg_dirty = true;
 							return true;
 						});
-				} });
+				}, false, [&, p, a] { cfg.ctl[p].pad[a] = PAD_NONE; cfg_dirty = true; } });
 		pg.items.push_back(back_item());
 		return pg;
 	};
@@ -1228,6 +1350,7 @@ int main(int argc, char **argv)
 	const uint64_t trace_t0 = SDL_GetTicksNS();
 	if (trace) fprintf(trace, "# pass t_ms due frame emu draw compose upload present kind now hold tiles_full tiles_ms layers layers_ms sky_build sky_build_ms sky_scale sky_scale_ms padded tex_made up_kpx stopped hp1 hp2 replay live r1 r2 quads mode alpha list0 list1 px py pz edge_ms\n");
 	while (running) {
+		if (!gov_from) { gov_from = SDL_GetTicksNS() + 10000000000ull; log_state("the start"); }
 		bool in_texture = false;           // this pass's picture is on the GPU already (or the last one stays)
 		curtain = false;
 		bool cut_hold = false;             // this pass's picture stays on purpose (a camera cut's hold)
@@ -1452,6 +1575,9 @@ int main(int argc, char **argv)
 			frame_clock = std::min(frame_clock, double(game_run) + 0.999);   // (frames not run: the menu opened, a restart)
 			if (curtain_on_gpu) { show_target = in_texture = true; tp.kind = 'F'; }
 			tp.due = due;
+			// testing: VF_TEST_LOAD, a slow start (the governor's tests)
+			if (test_load_ms > 0 && due && gov_from && SDL_GetTicksNS() < gov_from - 10000000000ull + uint64_t(test_load_s * 1e9))
+				for (const uint64_t until = SDL_GetTicksNS() + uint64_t(test_load_ms * 1e6 * due * cfg.scale * cfg.scale / 9); SDL_GetTicksNS() < until;) {}
 			if (due) tp.emu = SDL_GetTicksNS() - t0;
 			if (due) {
 				perf.emu += SDL_GetTicksNS() - t0;
@@ -1698,21 +1824,47 @@ int main(int argc, char **argv)
 				const bool dropouts = perf.starved > 0 && busy > 0.6;
 				// only steady play counts: a window with a scene change or a camera cut held in it (and
 				// the work around them) neither counts toward stepping down nor clears the count
-				if (perf.held == 0) over_windows = (short_of || dropouts || busy > 0.97) ? over_windows + 1 : 0;
+				const bool judged = SDL_GetTicksNS() >= gov_from;      // (not in the first 10 s on show)
+				if (perf.held == 0 && judged) over_windows = (short_of || dropouts || busy > 0.97) ? over_windows + 1 : 0;
+				// calm: every picture there, the sound fed, busy under 55%
+				const bool calm = !short_of && !dropouts && busy < 0.55 && (!m.smooth() || fps >= aim * 0.9);
+				if (perf.held == 0 && judged) gov_calm = calm ? gov_calm + 1 : 0;
 				if (trace) fprintf(trace, "# pass %lld governor window: busy %.0f%% shown %.0f/s aim %.0f starved %d over %d\n", (long long)frames_run, busy * 100, fps, aim, perf.starved, over_windows);
 				if (over_windows >= 3) {
 					over_windows = 0;
+					gov_calm = 0;
+					if (gov_raised) gov_no_raise = true;     // (a step back up that didn't hold: no more this run)
 					if (trace) fprintf(trace, "# pass %lld governor acts\n", (long long)frames_run);
 					if (player_scale < 0) { player_scale = cfg.scale; player_aa = cfg.aa; }
-					if (smooth_gap_ns < 16666666) {
+					// (60 a second only on a screen faster than 60 Hz: at 60 or less a picture each
+					// refresh is no more, and the budget would leave refreshes without one)
+					if (smooth_gap_ns < 16666666 && hz > 65) {
 						smooth_gap_ns = 16666666;
 						fprintf(stderr, "load %.0f%%, %.0f FPS: smooth pictures limited to 60 a second\n", busy * 100, fps);
+						log_state("the governor's");
 					} else if (cfg.aa != 1) {
 						cfg.aa = 1; set_scale(cfg.scale, false);
 						fprintf(stderr, "load %.0f%%, %.0f FPS: antialiasing off\n", busy * 100, fps);
 					} else if (cfg.scale > 1) {
 						set_scale(cfg.scale - 1, false);
 						fprintf(stderr, "load %.0f%%, %.0f FPS: render scale lowered to %dx\n", busy * 100, fps, cfg.scale);
+					}
+				}
+				// back up a step towards the player's after 10 s of calm (10 windows)
+				else if (gov_calm >= 10 && !gov_no_raise && player_scale >= 0 && (cfg.scale < player_scale || cfg.aa != player_aa || smooth_gap_ns > 8333333)) {
+					gov_calm = 0;
+					gov_raised = true;
+					if (cfg.scale == player_scale && cfg.aa == player_aa) {   // (the last step: a picture each refresh again)
+						smooth_gap_ns = 8333333;
+						fprintf(stderr, "load %.0f%%, %.0f FPS: smooth pictures each refresh again\n", busy * 100, fps);
+						log_state("the governor's");
+					} else if (cfg.scale < player_scale) {
+						fprintf(stderr, "load %.0f%%, %.0f FPS: render scale back up to %dx\n", busy * 100, fps, cfg.scale + 1);
+						set_scale(cfg.scale + 1, false);
+					} else {
+						fprintf(stderr, "load %.0f%%, %.0f FPS: antialiasing back on\n", busy * 100, fps);
+						cfg.aa = player_aa;
+						set_scale(cfg.scale, false);
 					}
 				}
 			}
@@ -1724,7 +1876,8 @@ int main(int argc, char **argv)
 
 	if (gpu_check) fprintf(stderr, "gpu check: %d pictures put together on the GPU checked, %d differ\n", gpu_checked, gpu_differ);
 	gc.reset();                          // (its textures go before the renderer)
-	if (quit_after >= 0) { SDL_Quit(); return 0; }   // test runs leave the saves and settings alone
+	if (quit_after >= 0 && !getenv("VF_SAVE")) { SDL_Quit(); return 0; }   // test runs leave the saves and settings alone (VF_SAVE: they save, as a player's)
+	keep_arcade_coins();
 	save_blob(nv_path, m.nvram().data(), m.nvram().size());
 	save_blob(ee_path, m.eeprom(), model1::EEPROM_SIZE);
 	if (cfg_dirty) {
