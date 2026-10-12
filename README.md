@@ -48,6 +48,10 @@ side by side and compares every register at every scanline.
 | `tools/recomp` | the ahead-of-time recompiler (V60 to C++) |
 | `tools` | region builder, disassembler, headless runner, lockstep checker, the release scripts, the site |
 
+## How it's made
+
+Made with the help of AI coding tools. Every build is checked against the arcade: the recompiled code runs side by side with an interpreter of the original code, and both are compared frame by frame with MAME's pictures, RAM and sound.
+
 ## Credits
 
 Built on MAME's work on the Model 1: the V60 core and disassembler (Farfetch'd, R. Belmont), the TGP,
