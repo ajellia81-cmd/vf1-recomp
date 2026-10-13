@@ -38,6 +38,9 @@ static thread_local int t_band_y1 = -(1 << 30), t_band_y2 = 1 << 30;
 static thread_local rectangle t_full_clip;
 static thread_local bool t_banded = false;
 std::vector<uint8_t> model1::s_qstage;
+// Recording for the GPU at 1x: the rasterizer's own spans, kept instead of drawn
+static thread_local std::vector<gpu3d_span> *t_sink = nullptr;
+static thread_local uint32_t t_sink_poly = 0;
 
 // Crack-free filling for scales above 1: the edges are evaluated at each pixel row's centre from
 // the vertices' unrounded positions, and a pixel is filled when its centre lies inside (left
@@ -185,6 +188,7 @@ void model1::view_t::project_point_direct(point_t *p) const
 
 void model1::draw_hline(bitmap_rgb32 &bitmap, int x1, int x2, int y, int color)
 {
+	if (t_sink) { t_sink->push_back({ t_sink_poly, y, x1, x2 }); return; }
 	uint32_t *const base = &bitmap.pix(y);
 	while(x1 <= x2)
 	{
@@ -195,6 +199,7 @@ void model1::draw_hline(bitmap_rgb32 &bitmap, int x1, int x2, int y, int color)
 
 void model1::draw_hline_moired(bitmap_rgb32 &bitmap, int x1, int x2, int y, int color)
 {
+	if (t_sink) { t_sink->push_back({ t_sink_poly, y, x1, x2 }); return; }
 	uint32_t *const base = &bitmap.pix(y);
 	if (s_moire_blend) {
 		// The arcade's checkerboard shades a pixel once however many shadows overlap (they
@@ -328,7 +333,10 @@ void model1::fill_line(bitmap_rgb32 &bitmap, view_t *view, int color, int32_t y,
 // into INT32_MIN on x86 hosts), so clip the segment to the viewport first,
 // like fill_slope() does for the filler - unclipped, wingwar hung during boot
 // walking a ~2^31-pixel line.
-static void draw_wireframe_line(bitmap_rgb32 &bitmap, const rectangle &clip, int x1, int y1, int x2, int y2, uint32_t color, bool moire)
+// A wireframe line's pixels (clipped, then Bresenham), each handed to plot(x, y): the CPU draws
+// them, the GPU's recording keeps them
+template <class F>
+static void line_pixels(const rectangle &clip, int bw, int bh, int x1, int y1, int x2, int y2, bool moire, F plot)
 {
 	// Liang-Barsky clip against the viewport rectangle (doubles hold every
 	// int32 exactly, so in-range endpoints pass through unchanged)
@@ -372,15 +380,21 @@ static void draw_wireframe_line(bitmap_rgb32 &bitmap, const rectangle &clip, int
 	int err = dx - dy;
 	for (;;)
 	{
-		if (x1 >= 0 && x1 < bitmap.width() && y1 >= 0 && y1 < bitmap.height() && y1 >= t_band_y1 && y1 <= t_band_y2)
+		if (x1 >= 0 && x1 < bw && y1 >= 0 && y1 < bh && y1 >= t_band_y1 && y1 <= t_band_y2)
 			if (!moire || !((x1 ^ y1) & 1))
-				bitmap.pix(y1, x1) = color;
+				plot(x1, y1);
 		if (x1 == x2 && y1 == y2)
 			break;
 		int e2 = 2 * err;
 		if (e2 > -dy) { err -= dy; x1 += sx; }
 		if (e2 < dx)  { err += dx; y1 += sy; }
 	}
+}
+
+
+static void draw_wireframe_line(bitmap_rgb32 &bitmap, const rectangle &clip, int x1, int y1, int x2, int y2, uint32_t color, bool moire)
+{
+	line_pixels(clip, bitmap.width(), bitmap.height(), x1, y1, x2, y2, moire, [&](int x, int y) { bitmap.pix(y, x) = color; });
 }
 
 void model1::fill_quad(bitmap_rgb32 &bitmap, view_t *view, const quad_t& q) const
@@ -697,6 +711,22 @@ void model1::draw_quads(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 	view->y1 = std::max(view->y1, cliprect.min_y);
 	view->y2 = std::min(view->y2, cliprect.max_y);
 
+	if (m_rec) { if (count > 0) record_quads(view, count); }
+	else {
+		const uint64_t t0 = trace_ns();
+		raster_quads(bitmap, view, count);
+		m_raster_ms += (trace_ns() - t0) / 1e6;
+	}
+
+	view->x1 = save_x1;
+	view->x2 = save_x2;
+	view->y1 = save_y1;
+	view->y2 = save_y2;
+}
+
+// The CPU's drawing of the list (m_quadind's first `count`) within the view's clip
+void model1::raster_quads(bitmap_rgb32 &bitmap, view_t *view, int count)
+{
 	// debug: VF_PICK=x,y,frame prints every polygon that writes that pixel on that frame
 	static int pick_x = -1, pick_y = -1, pick_f = -1;
 	static const char *pick_env = getenv("VF_PICK");
@@ -776,10 +806,6 @@ void model1::draw_quads(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 #endif
 	}
 
-	view->x1 = save_x1;
-	view->x2 = save_x2;
-	view->y1 = save_y1;
-	view->y2 = save_y2;
 }
 #if 0
 uint16_t model1::scale_color(uint16_t color, float level) const
@@ -1682,9 +1708,19 @@ void model1::view_t::set_zoom(float x, float y)
 	recompute_frustum();
 }
 
+// MAME normalizes the light vector. Sarah's stage lights the fighters from below (y > 0, the only
+// light from below in the game) and pulses it by its length, 0.5 to 1.7 and back every 256 frames,
+// with the floor; normalized, that pulse is lost and the undersides stay at one shade. The cabinet
+// shows them brighter: kept at its length there (as the Model 2 GEO uses its light vector).
+glm::vec3 model1::view_t::light_vector(float x, float y, float z)
+{
+	const glm::vec3 v(x, y, z);
+	return y > 0 ? v : glm::normalize(v);
+}
+
 void model1::view_t::set_light_direction(float x, float y, float z)
 {
-	light = glm::normalize(glm::vec3(x, y, z));
+	light = light_vector(x, y, z);
 }
 
 void model1::view_t::set_translation_matrix(float* mat)
@@ -2067,4 +2103,270 @@ void model1::screen_vblank_model1(int state)
 		end_frame();
 		M1_LOG(LOG_TGP, "TGP: vsync\n");
 	}
+}
+
+// ---- the 3D on the GPU (src/gpu/gpu3d.h) ----
+
+// draw_quads in GPU mode: the list as it would be drawn, recorded (and kept, to be drawn by the CPU
+// if the GPU can't)
+void model1::record_quads(view_t *view, int count)
+{
+	const uint64_t t0 = trace_ns();
+	static const bool no_depth = getenv("VF_NO_SHADOW_DEPTH") != nullptr;
+	const bool depth = s_hd_raster && s_moire_blend && !no_depth;
+	const uint32_t batch = uint32_t(m_rec_batches.size());
+	m_rec_batches.push_back({ view->x1, view->x2, view->y1, view->y2, m_rec_quads.size(), size_t(count) });
+	for (int i = 0; i < count; i++) {
+		const quad_t &q = *m_quadind[i];
+		m_rec_quads.push_back(q);
+		for (int k = 0; k < 4; k++) m_rec_points.push_back(*q.p[k]);
+		if (m_rec_bad || view->y2 < view->y1) continue;
+		int color = q.col;
+		if (color < 0) color = -1 - color;
+		// a wireframe line (two distinct vertices, as fill_quad tells): its pixels worked out here, as
+		// draw_wireframe_line plots them, each a span
+		{
+			const int ax = q.p[0]->s.x, ay = q.p[0]->s.y;
+			int bx = ax, by = ay, ndist = 1;
+			for (int k = 1; k < 4 && ndist < 3; k++) {
+				const int vx = q.p[k]->s.x, vy = q.p[k]->s.y;
+				if (vx == ax && vy == ay) continue;
+				if (ndist == 1) { bx = vx; by = vy; ndist = 2; }
+				else if (vx != bx || vy != by) ndist = 3;
+			}
+			if (ndist == 2) {
+				gpu3d_poly g;
+				g.flags = G3_LINE | ((color & MOIRE) ? G3_CHECKER : 0);
+				g.colour = uint32_t(color & ~MOIRE);
+				g.batch = batch;
+				const uint32_t idx = uint32_t(m_rec_polys.size());
+				const size_t from = m_rec_spans.size();
+				line_pixels(rectangle(view->x1, view->x2, view->y1, view->y2), m_bitmap_rec_w, m_bitmap_rec_h, ax, ay, bx, by, (color & MOIRE) != 0,
+							[&](int x, int y) { m_rec_spans.push_back({ idx, y, x, x }); });
+				if (m_rec_spans.size() == from) continue;
+				for (size_t k = from; k < m_rec_spans.size(); k++) { m_rec_y0 = std::min(m_rec_y0, m_rec_spans[k].y); m_rec_y1 = std::max(m_rec_y1, m_rec_spans[k].y); }
+				m_rec_polys.push_back(g);
+				continue;
+			}
+		}
+		gpu3d_poly g;
+		g.cx0 = view->x1; g.cx1 = view->x2; g.cy0 = view->y1; g.cy1 = view->y2;
+		g.batch = batch;
+		const bool fighter = depth && fighter_shadow(q);
+		if (fighter) g.flags |= G3_FIGHTER | G3_SHADOW;
+		else if (color & MOIRE) g.flags |= s_moire_blend ? G3_SHADOW : G3_CHECKER;
+		if (stage_model(q.obj)) g.flags |= G3_STAGE;
+		g.colour = (g.flags & G3_CHECKER) ? uint32_t(color) & 0xffffff : uint32_t(color);
+		const uint32_t idx = uint32_t(m_rec_polys.size());
+		int ya, yb;
+		if (s_hd_raster) {
+			bool ok = true;
+			for (int k = 0; k < 4; k++) {
+				g.x[k] = q.p[k]->fx; g.y[k] = q.p[k]->fy;
+				ok = ok && std::fabs(g.x[k]) < 1e7f && std::fabs(g.y[k]) < 1e7f;   // (NaN fails too)
+			}
+			if (!ok) { if (!m_rec_bad && getenv("VF_LOG_GPU3D")) fprintf(stderr, "gpu3d: a vertex out of range (frame %llu, obj %06x: %g,%g %g,%g %g,%g %g,%g)\n", (unsigned long long)m_frame, q.obj, g.x[0], g.y[0], g.x[1], g.y[1], g.x[2], g.y[2], g.x[3], g.y[3]); m_rec_bad = true; continue; }
+			const float ymin = std::min({ g.y[0], g.y[1], g.y[2], g.y[3] }), ymax = std::max({ g.y[0], g.y[1], g.y[2], g.y[3] });
+			ya = std::max(view->y1, int(std::ceil(ymin - 0.5f)));
+			yb = std::min(view->y2, int(std::ceil(ymax - 0.5f)) - 1);
+			if (yb < ya) continue;
+			g.flags |= G3_ROWS;
+			g.y0 = ya; g.rows = yb - ya + 1;
+			g.span0 = 2 * m_rec_rows;
+			m_rec_rows += uint32_t(g.rows);
+		} else {
+			// 1x: the rasterizer's spans (fill_quad), kept
+			const size_t from = m_rec_spans.size();
+			static bitmap_rgb32 none;
+			t_sink = &m_rec_spans; t_sink_poly = idx;
+			fill_quad(none, view, q);
+			t_sink = nullptr;
+			if (m_rec_spans.size() == from) continue;
+			ya = 1 << 30; yb = -1;
+			for (size_t k = from; k < m_rec_spans.size(); k++) { ya = std::min(ya, m_rec_spans[k].y); yb = std::max(yb, m_rec_spans[k].y); }
+		}
+		m_rec_y0 = std::min(m_rec_y0, ya); m_rec_y1 = std::max(m_rec_y1, yb);
+		if (g.flags & G3_SHADOW) { m_rec_m0 = std::min(m_rec_m0, ya); m_rec_m1 = std::max(m_rec_m1, yb); }
+		m_rec_polys.push_back(g);
+	}
+	m_rec_ms += (trace_ns() - t0) / 1e6;
+}
+
+void model1::gpu3d_begin(const bitmap_rgb32 &bitmap)
+{
+	m_bitmap_rec_w = bitmap.width(); m_bitmap_rec_h = bitmap.height();
+	m_rec = true;
+	m_rec_bad = false;
+	m_rec_batches.clear(); m_rec_quads.clear(); m_rec_points.clear(); m_rec_polys.clear(); m_rec_spans.clear();
+	m_rec_rows = 0;
+	m_rec_y0 = m_rec_m0 = 1 << 30;
+	m_rec_y1 = m_rec_m1 = -1;
+	m_rec_ms = 0;
+}
+
+// The recording drawn by the CPU, as draw_quads would have
+void model1::rec_replay(bitmap_rgb32 &bitmap)
+{
+	view_t *view = m_view.get();
+	const int sx1 = view->x1, sx2 = view->x2, sy1 = view->y1, sy2 = view->y2;
+	for (const rec_batch &b : m_rec_batches) {
+		view->x1 = b.x1; view->x2 = b.x2; view->y1 = b.y1; view->y2 = b.y2;
+		for (size_t i = 0; i < b.count; i++) {
+			quad_t &q = m_rec_quads[b.first + i];
+			for (int k = 0; k < 4; k++) q.p[k] = &m_rec_points[(b.first + i) * 4 + k];
+			m_quadind[i] = &q;
+		}
+		raster_quads(bitmap, view, int(b.count));
+	}
+	view->x1 = sx1; view->x2 = sx2; view->y1 = sy1; view->y2 = sy2;
+}
+
+void model1::gpu3d_end(bitmap_rgb32 &bitmap)
+{
+	m_rec = false;
+	const uint64_t t0 = trace_ns();
+	bool ok = true;
+	double gms = 0;
+	const bool verify = m_gpu3d_verify > 0 && !m_rec_bad && m_rec_polys.size() >= 200 && (m_g3.pictures % 60) == 0;
+	const bool check = verify || (m_gpu3d_check > 0 && !m_rec_bad && (m_g3.pictures % uint64_t(m_gpu3d_check)) == 0);
+	if (check) {   // (tests: the picture before the 3D, for the CPU's)
+		if (m_check_cpu.width() != bitmap.width() || m_check_cpu.height() != bitmap.height()) m_check_cpu.allocate(bitmap.width(), bitmap.height());
+		memcpy(m_check_cpu.data(), bitmap.data(), size_t(bitmap.width()) * bitmap.height() * 4);
+	}
+	if (m_rec_bad) ok = false;
+	else if (!m_rec_polys.empty()) {
+		ok = m_gpu3d->draw(m_rec_polys.data(), m_rec_polys.size(), m_rec_spans.data(), m_rec_spans.size(), size_t(m_rec_rows) * 2,
+						   bitmap.data(), bitmap.bytes(),
+						   bitmap.width(), bitmap.height(), m_rec_y0, m_rec_y1, &gms);
+		if (!ok) { m_g3.failed++; fprintf(stderr, "the 3D on the GPU: a picture failed: drawn by the CPU\n"); }
+	}
+	double ms = m_rec_ms + (trace_ns() - t0) / 1e6;
+	if (!ok) {
+		m_g3.cpu_fallback++;
+		rec_replay(bitmap);
+		ms = m_rec_ms + (trace_ns() - t0) / 1e6;
+	} else {
+		m_g3.pictures++;
+		// the rows a shadow may have marked (more than the CPU's own is no matter: elsewhere the
+		// marks' clearing changes nothing)
+		if (s_moire_blend && m_rec_m0 <= m_rec_m1) { s_mark_y1 = std::min(s_mark_y1, m_rec_m0); s_mark_y2 = std::max(s_mark_y2, m_rec_m1); }
+		if (check) {
+			rec_replay(m_check_cpu);
+			const size_t n = size_t(bitmap.width()) * bitmap.height();
+			const uint32_t *a = m_check_cpu.data(), *g = bitmap.data();
+			size_t diff = 0, first = n;
+			for (size_t i = 0; i < n; i++) if (a[i] != g[i]) { if (!diff) first = i; diff++; }
+			m_g3.checked++;
+			if (diff) {
+				m_g3.differ++;
+				fprintf(stderr, "gpu3d check: frame %llu %dx%d: %zu pixels differ (first at %zu,%zu: cpu %08x gpu %08x)\n",
+						(unsigned long long)m_frame, bitmap.width(), bitmap.height(), diff, first % bitmap.width(), first / bitmap.width(), a[first], g[first]);
+			}
+			if (verify) {
+				if (diff) {   // (not the CPU's: the CPU's picture shown, and the CPU's from now on)
+					memcpy(bitmap.data(), m_check_cpu.data(), n * 4);
+					m_g3.failed++;
+					m_gpu3d_verify = 0;
+					fprintf(stderr, "the 3D on the GPU: its picture isn't the CPU's: the CPU's 3D from now on\n");
+				} else if (--m_gpu3d_verify == 0)
+					fprintf(stderr, "the 3D on the GPU: the game's pictures checked against the CPU's, pixel for pixel\n");
+			}
+		}
+	}
+	m_g3.gpu = ok;
+	m_g3.gpu_ms = gms;
+	m_g3.rec_ms = m_rec_ms;
+	m_g3.polys = int(m_rec_polys.size());
+	m_g3.ms = ms;
+	m_rec_quads.clear();   // (the points' copies stay allocated)
+}
+
+// Auto's measure (the host's Display > 3D renderer: Auto): a made-up picture the size of a fight's
+// (a floor of large polygons, the backdrop's, two fighters' worth of small ones, their shadows)
+// drawn unseen at the render scale by the CPU and by the GPU, `reps` times each; the median times
+// (ms, the GPU's wall time: recorded, drawn and back). False: the GPU couldn't.
+bool model1::bench3d(int reps, double &cpu_ms, double &gpu_ms, long long *differ)
+{
+	if (!m_gpu3d) return false;
+	const int W = m_bitmap.width(), H = m_bitmap.height();
+	static bitmap_rgb32 scratch;
+	if (scratch.width() != W || scratch.height() != H) scratch.allocate(W, H);
+	std::vector<point_t> pts;
+	std::vector<quad_t> qs;
+	uint32_t seed = 0x1234567;
+	auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return float(seed >> 8) / float(1 << 24); };
+	auto quad = [&](float x, float y, float w, float h, float skew, uint32_t col, uint32_t obj) {
+		const float xs[4] = { x, x + w, x + w + skew, x + skew }, ys[4] = { y, y, y + h, y + h };
+		for (int k = 0; k < 4; k++) {
+			point_t p;
+			p.fx = xs[k]; p.fy = ys[k];
+			p.s.x = int(xs[k]); p.s.y = int(ys[k]);
+			pts.push_back(p);
+		}
+		qs.push_back(quad_t(int(col), 0, nullptr, nullptr, nullptr, nullptr));
+		qs.back().obj = obj;
+	};
+	// the backdrop's and the floor's, far to near (a stage's model)
+	for (int i = 0; i < 60; i++) quad(rnd() * W, H * 0.2f + rnd() * H * 0.2f, W * (0.05f + 0.1f * rnd()), H * 0.1f * rnd() + 4, 0, (seed & 0xffffff) & 0x7f7f7f, 0x10000);
+	for (int r = 0; r < 8; r++)
+		for (int c = 0; c < 8; c++) quad(-W * 0.2f + c * W * 0.18f, H * 0.4f + r * H * 0.075f, W * 0.18f, H * 0.075f, W * 0.02f * (c - 4), 0x405060 + r * 0x010101 + c, 0x10000);
+	// the fighters' shadows, then the fighters (small polygons, about a thousand)
+	for (int i = 0; i < 16; i++) quad(W * 0.3f + rnd() * W * 0.4f, H * 0.78f + rnd() * H * 0.05f, W * 0.03f, H * 0.02f, 0, 0x01000000 | 0x202020, 0x90000);
+	for (int i = 0; i < 1000; i++) {
+		const float cx = (i & 1) ? W * 0.4f : W * 0.6f;
+		quad(cx + (rnd() - 0.5f) * W * 0.12f, H * 0.25f + rnd() * H * 0.55f, W * (0.004f + 0.012f * rnd()), H * (0.006f + 0.02f * rnd()), (rnd() - 0.5f) * 6, seed & 0x7f7f7f, 0x90000);
+	}
+	for (size_t i = 0; i < qs.size(); i++)
+		for (int k = 0; k < 4; k++) qs[i].p[k] = &pts[i * 4 + k];
+	view_t *view = m_view.get();
+	const int sx1 = view->x1, sx2 = view->x2, sy1 = view->y1, sy2 = view->y2;
+	const int mk1 = s_mark_y1, mk2 = s_mark_y2;
+	view->x1 = 0; view->x2 = W - 1; view->y1 = 0; view->y2 = H - 1;
+	auto setind = [&] { for (size_t i = 0; i < qs.size(); i++) m_quadind[i] = &qs[i]; };
+	auto run_cpu = [&] {
+		scratch.fill(KEY);
+		setind();
+		const uint64_t t0 = trace_ns();
+		raster_quads(scratch, view, int(qs.size()));
+		return (trace_ns() - t0) / 1e6;
+	};
+	auto run_gpu = [&]() -> double {
+		scratch.fill(KEY);
+		setind();
+		const bool on = m_gpu3d_on;
+		const uint64_t t0 = trace_ns();
+		gpu3d_begin(scratch);
+		record_quads(view, int(qs.size()));
+		const uint64_t was = m_g3.failed;
+		const int chk = m_gpu3d_check, ver = m_gpu3d_verify;
+		m_gpu3d_check = m_gpu3d_verify = 0;
+		gpu3d_end(scratch);
+		m_gpu3d_check = chk; m_gpu3d_verify = ver;
+		m_gpu3d_on = on;
+		if (m_g3.gpu) m_g3.pictures--;
+		return m_g3.failed != was || !m_g3.gpu ? -1.0 : (trace_ns() - t0) / 1e6;
+	};
+	std::vector<double> c, g;
+	bool ok = run_gpu() >= 0;   // (its warm-up)
+	for (int i = 0; i < reps && ok; i++) {
+		c.push_back(run_cpu());
+		const double t = run_gpu();
+		if (t < 0) ok = false;
+		g.push_back(t);
+	}
+	if (differ && ok) {   // (the picture each way, compared)
+		run_cpu();
+		std::vector<uint32_t> cpu(scratch.data(), scratch.data() + size_t(W) * H);
+		ok = run_gpu() >= 0;
+		long long d = 0;
+		for (size_t i = 0; i < cpu.size(); i++) d += cpu[i] != scratch.data()[i];
+		*differ = d;
+	}
+	view->x1 = sx1; view->x2 = sx2; view->y1 = sy1; view->y2 = sy2;
+	s_mark_y1 = mk1; s_mark_y2 = mk2;
+	m_g3 = gpu3d_stats{ 0, 0, 0, false, 0, m_g3.failed, m_g3.cpu_fallback, m_g3.checked, m_g3.differ, m_g3.pictures };
+	if (!ok) return false;
+	std::sort(c.begin(), c.end()); std::sort(g.begin(), g.end());
+	cpu_ms = c[c.size() / 2]; gpu_ms = g[g.size() / 2];
+	return true;
 }

@@ -59,7 +59,7 @@ fi
 
 # the icon, the manifest (UTF-8 file names) and the version (Properties > Details), as resources: an unsigned
 # exe that says nothing about itself is what antivirus heuristics flag most
-VER=$(git describe --tags --always 2>/dev/null || echo v0.0.0)
+VER=${VF_VERSION:-$(git describe --tags --always 2>/dev/null || echo v0.0.0)}   # (VF_VERSION=v1.1.11 for a release)
 V4=$(echo "$VER" | sed -E 's/^v//; s/-([0-9]+)-g[0-9a-f]+$/.\1/' | awk -F. '{ printf "%d,%d,%d,%d", $1, $2, $3, $4 }')
 cat > $D/vf.rc <<EOF
 1 ICON "$PWD/assets/icon/VF1.ico"

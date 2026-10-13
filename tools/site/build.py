@@ -112,6 +112,10 @@ def main():
     # the marquee (the app icon's letters, drawn wide) and the page icons
     img = os.path.join(OUT, 'img')
     os.makedirs(img, exist_ok=True)
+    # the README's montage (game pictures: kept out of git, in build/readme, and served from the site)
+    m = os.path.join(ROOT, 'build', 'readme', 'vf1_montage.jpg')
+    if os.path.exists(m): shutil.copyfile(m, os.path.join(img, 'montage.jpg'))
+    else: print('no build/readme/vf1_montage.jpg: no README montage on the site')
     icon = Image.open(os.path.join(ROOT, 'assets', 'icon', 'icon.png')).convert('RGBA')
     subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'site', 'marquee.py'), os.path.join(img, 'marquee.png')], check=True)
     icon.resize((64, 64), Image.LANCZOS).save(os.path.join(img, 'icon-64.png'), optimize=True)

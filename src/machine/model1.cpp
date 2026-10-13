@@ -865,7 +865,12 @@ void model1::screen_update(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		parallel_rows(bitmap.height(), [&](int a, int b) {
 			for (int y = a; y < b; y++) { uint32_t *p = &bitmap.pix(y); for (int x = 0; x < bitmap.width(); x++) p[x] |= UNDER_3D; }
 		});
+	const bool g3 = gpu3d_on() && !no_polys;   // the 3D on the GPU (gpu3d_end), else the CPU's
+	m_raster_ms = 0;
+	if (g3) gpu3d_begin(bitmap);
 	if (!no_polys) tgp_render(bitmap, cliprect, RENDER_BELOW_HUD);
+	if (g3) gpu3d_end(bitmap);
+	else { m_g3.gpu = false; m_g3.ms = m_raster_ms; m_g3.gpu_ms = 0; }
 	clear_moire_marks(bitmap, cliprect);
 	if (m_edge_aa && !no_polys) {
 		const uint64_t t0 = trace_ns();

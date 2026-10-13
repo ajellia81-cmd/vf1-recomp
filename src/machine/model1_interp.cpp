@@ -62,7 +62,7 @@ void model1::index_objects(logic_frame &lf)
 		case 9: case 0xc: off += 6; break;
 		case 0xa:                                  // the light vector, as set_light_direction keeps it
 			{
-				const glm::vec3 v = glm::normalize(glm::vec3(rdf(off + 2), rdf(off + 4), rdf(off + 6)));
+				const glm::vec3 v = view_t::light_vector(rdf(off + 2), rdf(off + 4), rdf(off + 6));
 				light[0] = v.x; light[1] = v.y; light[2] = v.z;
 				has_light = true;
 			}

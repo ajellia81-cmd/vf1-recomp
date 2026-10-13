@@ -2,9 +2,10 @@
    Gradients are the vertex-colour kind (horizontal-gradient): the SDL renderer has no shaders.
 
    One column with a fixed space for each part, so nothing overlaps whatever the page:
-     top 48 + title 73 + crumb 38 + rows 8 x 46 = 368 + note 12 + 96 (4 lines) + hint 12 + 26
-     = 673dp of 720. Longer pages scroll inside the rows; a long value is cut, never drawn
-     over its label. */
+     top 26 + title 56 + crumb 30 + rows 14 x 32 = 448 + note 8 + 84 (4 lines) + hint 6 + 22
+     + version 2 + 18 = 700dp of 720: the longest page (a player's keys, 14 rows) fits without
+     scrolling at any window size (1dp follows the window's height). Longer pages would scroll
+     inside the rows; a long value is cut, never drawn over its label. */
 
 body {
 	width: 100%;
@@ -26,26 +27,26 @@ div { display: block; }
 #panel {
 	position: absolute;
 	left: 9%;
-	top: 48dp;
-	width: 520dp;
+	top: 26dp;
+	width: 540dp;
 }
 
 #title {
-	font-size: 60dp;
+	font-size: 48dp;
 	font-weight: bold;
 	font-style: italic;
 	color: #ffd23f;
-	height: 64dp;
-	line-height: 64dp;
-	padding-bottom: 6dp;
+	height: 50dp;
+	line-height: 50dp;
+	padding-bottom: 3dp;
 	border-bottom: 3dp #ffd23f;
 }
 
 #crumb {
-	height: 30dp;
-	line-height: 30dp;
-	margin-bottom: 8dp;
-	font-size: 21dp;
+	height: 26dp;
+	line-height: 26dp;
+	margin-bottom: 4dp;
+	font-size: 19dp;
 	font-weight: 500;
 	color: #8fa3d6;
 	white-space: nowrap;
@@ -53,17 +54,17 @@ div { display: block; }
 }
 
 #rows {
-	max-height: 368dp;      /* 8 rows; longer pages scroll, keeping the selected row in view */
+	max-height: 448dp;      /* 14 rows; longer pages scroll, keeping the selected row in view */
 	overflow-y: hidden;
 }
 
 .row {
 	display: flex;
-	height: 42dp;
-	line-height: 42dp;
-	padding: 0 18dp;
-	margin-bottom: 4dp;
-	font-size: 27dp;
+	height: 30dp;
+	line-height: 30dp;
+	padding: 0 16dp;
+	margin-bottom: 2dp;
+	font-size: 23dp;
 	color: #c3cff0;
 	white-space: nowrap;
 	transition: padding-left 0.12s cubic-out;
@@ -84,7 +85,7 @@ div { display: block; }
 .row.selected {
 	decorator: horizontal-gradient(#ffd23f #ff8f1f);
 	color: #0b1430;
-	padding-left: 32dp;
+	padding-left: 28dp;
 }
 
 .row.selected .value { color: #0b1430; }
@@ -93,9 +94,9 @@ div { display: block; }
 .row.selected .arrow { color: #0b1430; }
 
 .row.info {
-	height: 31dp;
-	line-height: 31dp;
-	font-size: 22dp;
+	height: 26dp;
+	line-height: 26dp;
+	font-size: 19dp;
 	font-weight: 500;
 	margin-bottom: 0;
 }
@@ -103,20 +104,20 @@ div { display: block; }
 .row.info .value { color: #dfe7fb; }
 
 #note {
-	margin-top: 12dp;
-	height: 96dp;           /* four lines; the help texts are written to fit */
-	line-height: 24dp;
+	margin-top: 8dp;
+	height: 84dp;           /* four lines; the help texts are written to fit */
+	line-height: 21dp;
 	overflow: hidden;
-	font-size: 20dp;
+	font-size: 18dp;
 	font-weight: 500;
 	color: #8fa3d6;
 }
 
 #hint {
-	margin-top: 12dp;
-	height: 26dp;
-	line-height: 26dp;
-	font-size: 19dp;
+	margin-top: 6dp;
+	height: 22dp;
+	line-height: 22dp;
+	font-size: 17dp;
 	font-weight: 500;
 	color: #8fa3d6;
 	white-space: nowrap;
@@ -126,10 +127,10 @@ div { display: block; }
 
 /* the version and date, small, under the hint */
 #ver {
-	margin-top: 6dp;
-	height: 22dp;
-	line-height: 22dp;
-	font-size: 17dp;
+	margin-top: 2dp;
+	height: 18dp;
+	line-height: 18dp;
+	font-size: 15dp;
 	font-weight: 500;
 	color: #5f6f9c;
 	white-space: nowrap;

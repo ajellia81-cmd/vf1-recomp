@@ -6,6 +6,11 @@
 #include <vector>
 #include <cmath>
 #include <deque>
+#include <cstdlib>
+#include <new>
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 
 struct rectangle
 {
@@ -14,6 +19,34 @@ struct rectangle
 	rectangle(int x0, int x1, int y0, int y1) : min_x(x0), max_x(x1), min_y(y0), max_y(y1) {}
 	int width() const { return max_x - min_x + 1; }
 	int height() const { return max_y - min_y + 1; }
+};
+
+// A bitmap's pixels page-aligned and a whole number of pages long: the GPU's 3D (src/gpu) draws into
+// them where they are (a Metal buffer made on the same memory), nothing copied either way.
+template <class T> struct page_allocator
+{
+	using value_type = T;
+	static constexpr size_t PAGE = 16384;
+	page_allocator() = default;
+	template <class U> page_allocator(const page_allocator<U> &) {}
+	static size_t bytes(size_t n) { return (n * sizeof(T) + PAGE - 1) / PAGE * PAGE; }
+	T *allocate(size_t n)
+	{
+#ifdef _WIN32
+		void *p = _aligned_malloc(std::max<size_t>(bytes(n), PAGE), PAGE);
+#else
+		void *p = std::aligned_alloc(PAGE, std::max<size_t>(bytes(n), PAGE));
+#endif
+		if (!p) throw std::bad_alloc();
+		return static_cast<T *>(p);
+	}
+#ifdef _WIN32
+	void deallocate(T *p, size_t) { _aligned_free(p); }
+#else
+	void deallocate(T *p, size_t) { std::free(p); }
+#endif
+	template <class U> bool operator==(const page_allocator<U> &) const { return true; }
+	template <class U> bool operator!=(const page_allocator<U> &) const { return false; }
 };
 
 class bitmap_rgb32
@@ -32,9 +65,11 @@ public:
 	}
 	void fill(uint32_t c) { std::fill(m_pix.begin(), m_pix.end(), c); }
 	const uint32_t *data() const { return m_pix.data(); }
+	uint32_t *data() { return m_pix.data(); }
+	size_t bytes() const { return page_allocator<uint32_t>::bytes(m_pix.size()); }   // (its pages')
 private:
 	int m_w = 0, m_h = 0;
-	std::vector<uint32_t> m_pix;
+	std::vector<uint32_t, page_allocator<uint32_t>> m_pix;
 };
 
 constexpr uint8_t pal5bit(uint8_t b) { b &= 0x1f; return (b << 3) | (b >> 2); }

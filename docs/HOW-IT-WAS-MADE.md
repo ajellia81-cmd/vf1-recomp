@@ -52,6 +52,22 @@ menu (RmlUi), saves, the first-launch file picker, and the parts that go beyond 
 - **Scene sync.** VF builds a new scene over several frames. The host holds the last complete picture until the new
   3D has settled, so scene changes don't show half-built frames.
 
+**The GPU renderer.** Since v1.1.11 the 3D can also be drawn on the GPU (Display > 3D renderer): Metal on a Mac,
+SDL_GPU compute on Windows (Direct3D 12 or Vulkan) and Linux / Steam Deck (Vulkan). The goal was the CPU renderer's
+picture exactly, not an approximation of it:
+
+- **Draw order as depth.** Model 1 draws its polygons in a sorted order, with no depth buffer to hand to a GPU. So the
+  GPU isn't used as a normal triangle rasteriser: a compute shader fills the polygons' rows itself, and for each pixel
+  the last polygon in the game's order wins (an atomic maximum of its place in the list), as on the CPU.
+- **The same arithmetic.** Each edge's crossing is worked out as the CPU does it, each step rounded on its own.
+  Matching that on every platform took care: GPU division isn't correctly rounded, so divisions are done in integer
+  arithmetic; shader compilers fuse multiply-adds, so nothing is fused; and float-to-integer conversion copies x86's.
+- **Checked, then trusted.** Over the attract and fights, at several scales and shapes, on Metal, Vulkan and
+  Direct3D 12, the GPU's pictures are the CPU's: 100%, no pixel different. The game repeats a small version of this at
+  every start: a test picture drawn both ways, then its first pictures of a fight. A difference, an error or a
+  missing driver, and that run uses the CPU. Auto (the default) then uses the GPU unless it's clearly slower than the
+  CPU on that machine.
+
 ## How it was checked
 
 Nothing was taken as working until it was measured. These checks run on every change that touches the game:
@@ -120,6 +136,16 @@ The AI wrote nearly all the code. A person decided what was right.
   screen's pace; the rest is dropped.
 - **Sound gaps under Wine** → its device runs about 5% slow and the queue overflowed → over 300 ms queued, the game
   waits for the sound instead of dropping it.
+- **Sarah's stage looked flat under the fighters** → the game pulses a light from below on her stage, setting its
+  length as well as its direction, and MAME (and the port) normalised every light vector, so the undersides stayed one
+  shade → a light pointing up (only that one) keeps its length, as the Model 1's geometry uses it, and the undersides
+  pulse with the floor as on the cabinet. Every other light is unchanged.
+- **A GPU picture that wasn't the CPU's on another platform** → a GPU's division, fused multiply-adds and
+  float-to-integer conversion each differ from the CPU's → integer division, no fusing, x86's conversion, and a
+  self-test at every start (see above).
+- **Players' setups** → portable mode (a `portable.txt` beside the program keeps everything in its folder) and a ROM
+  folder of the player's own (`--roms`, `VF_ROMS` or `roms_folder` in `settings.ini`), only read, so an update can't
+  touch it.
 - **A crash at exit on Linux** → a widescreen write ran past the end of each line in the tile chip → found with ASan
   and fixed. ASan now runs clean at several scales and shapes.
 
@@ -131,6 +157,7 @@ The AI wrote nearly all the code. A person decided what was right.
 - `tools/vflock.cpp`: the lockstep checker. Start here to see what "identical" means.
 - `src/machine/`: the Model 1 board (`model1*.cpp`): memory map, TGP glue, video, sky, sound, the I/O board.
 - `src/host/main.cpp`, `scene_sync.h`, `gpu_compose.h`: the host, pacing, governor, scene sync and GPU compositing.
+- `src/gpu/`, `src/machine/model1_gpu.cpp`: the GPU renderer (Metal, SDL_GPU and their shaders).
 - `tools/vfrun.cpp`, `tools/vfscript.cpp`: the headless runner and the scripted test harness. `tools/vfcov.cpp` makes
   the coverage runs the map comes from.
 - `git log`: each commit message explains what changed, why, and how it was checked.

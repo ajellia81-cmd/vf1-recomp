@@ -336,11 +336,13 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
         </ol>
         <h2><svg class="os" viewBox="0 0 24 24" aria-hidden="true"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z"/></svg>Steam Deck</h2>
         <ol>
-          <li>Unpack and copy the <b>VirtuaFighter</b> folder to the Deck, e.g. <code>~/Games</code>.</li>
+          <li>Copy the download to the Deck and unpack it there (Desktop Mode: right-click &gt; Extract &gt; Extract archive here).</li>
           <li>Put <code>vf.zip</code> in <code>VirtuaFighter/roms</code>.</li>
-          <li>Desktop Mode: Steam &gt; Add a Non-Steam Game, pick <code>VirtuaFighter.sh</code> (file type: All files).</li>
+          <li>Desktop Mode: Steam &gt; Add a Non-Steam Game, pick the <code>vf</code> file (file type: All files). In its Properties, set Start In to the <b>VirtuaFighter</b> folder and turn off any forced compatibility tool (Proton).</li>
           <li>Play it from Game Mode with the default gamepad layout.</li>
         </ol>
+        <p><b>Portable:</b> a file named <code>portable.txt</code> next to the program (Mac: next to the app) keeps everything in its folder, the copy of <code>vf.zip</code> too, and nothing in your user data folder.</p>
+        <p><b>Your own ROM folder</b> (e.g. Batocera's <code>/userdata/roms/ports/vf</code>): start it with <code>--roms &lt;folder&gt;</code>, set <code>VF_ROMS</code>, or add <code>roms_folder = &lt;folder&gt;</code> to <code>settings.ini</code>. The game looks for <code>vf.zip</code> there first and only reads it; <code>log.txt</code> says which folder it used. See the README.</p>
       </div></span>
     <span class="info"><button class="lnk" aria-expanded="false">Controls</button>
       <div class="pop wide" role="dialog" aria-label="Controls">
@@ -363,13 +365,21 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
       </div></span>
     <span class="info"><button class="lnk" aria-expanded="false">Changelog</button>
       <div class="pop" role="dialog" aria-label="Changelog">
-        <p><b>v1.1.10</b> &middot; Oct 13 2026</p>
+        <p><b>v1.1.11</b> &middot; Oct 13 2026</p>
         <ul>
+          <li>GPU renderer: the 3D can now be drawn by the graphics card on Mac, Windows and Steam Deck, with exactly the same picture. Display &gt; 3D renderer: Auto (the default) uses the GPU unless it's slower on your machine; the game checks the GPU's picture when it starts and uses the CPU if anything is off.</li>
+          <li>Sarah's stage: the light from below the fighters pulses with the floor, as on the cabinet.</li>
+          <li>Smaller menus: tighter rows and text, so more fits on small screens.</li>
+          <li>Steam Deck: simpler install steps in the README (the shortcut points at the game itself).</li>
+          <li>Portable mode: put a file named <code>portable.txt</code> beside the game and it keeps everything (settings, saves, screenshots, your ROM) in its own folder.</li>
+          <li>Your own ROM folder: <code>--roms &lt;folder&gt;</code>, <code>VF_ROMS</code> or <code>roms_folder</code> in <code>settings.ini</code> tells the game where <code>vf.zip</code> is (e.g. Batocera's <code>/userdata/roms/ports/vf</code>), so an update or reinstall can't touch it.</li>
+        </ul>
+        <details><summary>v1.1.10</summary><ul>
           <li>Arcade mode: Start only starts a game when there's a credit, like the cabinet's start button. Credits come from the Coin button.</li>
           <li>Widescreen: the player select gets its painted sides when player 2 starts from the demo or a challenger joins, not just for player 1.</li>
           <li>Name entry: the wheel's letters, symbols and BACK are blue and END is red, as on a real cabinet (they were black).</li>
           <li>Wolf's stage above 1x: the clouds blend into the sky instead of starting at a hard line.</li>
-        </ul>
+        </ul></details>
         <details><summary>v1.1.9</summary><ul>
           <li>Updating to a new version in a new folder no longer asks for your ROM again: the game keeps a copy in your user data folder.</li>
           <li>Switching between PC and Arcade play takes effect straight away, and each keeps its own coin settings (Arcade has credits, PC is free play).</li>

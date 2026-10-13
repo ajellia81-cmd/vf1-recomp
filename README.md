@@ -44,6 +44,9 @@ your screen's refresh rate.
 | The arcade's V60 program, recompiled to native code | Working |
 | TGP, rasterizer, tile layers, sound and I/O boards | Working: reimplemented from MAME's Model 1 code |
 | Render scale up to 6x, widescreen and ultrawide, smooth motion | Working |
+| The 3D drawn on the GPU (Display > 3D renderer: Auto, GPU or CPU) | Working on macOS (Metal), Windows (Direct3D 12 or Vulkan) and Steam Deck / Linux (Vulkan): the same picture as the CPU's, checked when the game starts; Auto uses the GPU unless it's clearly slower, and any difference or error falls back to the CPU |
+| Sarah's stage lighting (the light from below pulsing with the floor) | Working, as on the cabinet |
+| Portable mode, your own ROM folder | Working |
 | Menu, keyboard and gamepads, two players | Working |
 | macOS, Windows, Steam Deck / x86-64 Linux | Working |
 | Painted widescreen sides for the title and player select | Working in the downloads; not in this repository (4:3 without them) |
@@ -78,6 +81,24 @@ From the [latest release](https://github.com/mr-finster/vf1-recomp/releases/late
    use of a specific Steam Play compatibility tool" off: it's a native Linux game, and Proton stops it launching.
 4. Back in Game Mode, launch it from your Library with the default Gamepad layout.
 
+The Windows download also runs on the Deck under Proton (add `VirtuaFighter.exe` instead, with Proton forced on),
+but the native Linux build above is the one to use.
+
+**Portable mode:** put a file named `portable.txt` next to the program (Windows: beside `VirtuaFighter.exe`; Mac:
+beside the app, in the same folder; Steam Deck / Linux: in the VirtuaFighter folder) and the game keeps everything in
+that folder: settings, saves, screenshots, `log.txt` and the copy of your `vf.zip` (in its `roms` folder), with
+nothing in your user data folder (`%APPDATA%`, `~/Library/Application Support`, `~/.local/share`).
+
+**Your own ROM folder** (e.g. Batocera's `/userdata/roms/ports/vf`, or any folder an update won't touch): start the
+game with `--roms <folder>` (or `--roms=<folder>`), set the environment variable `VF_ROMS`, or add
+`roms_folder = <folder>` to `settings.ini`; the command line wins, then `VF_ROMS`, then `settings.ini`. `~` is your home
+folder, and a relative path in `settings.ini` is from its folder. The game looks there first for `vf.zip` (and `model1io.zip`, if you have it) and
+only reads it (no copy is kept anywhere else); `log.txt` names the folder it used. If the zip isn't there, the log
+says where it looked and the game carries on as without the option; a zip you then choose with the file picker is
+copied into your ROM folder, so the next start finds it there. Examples: Windows `VirtuaFighter.exe --roms "D:\ROMs\vf"`;
+Mac `open "Virtua Fighter Recomp.app" --args --roms ~/ROMs/vf`; Linux / Batocera
+`./VirtuaFighter.sh --roms /userdata/roms/ports/vf`.
+
 > [!NOTE]
 > The Mac and Windows builds aren't signed. On macOS, open it once, close the message, then System Settings >
 > Privacy & Security > Open Anyway. On Windows, if SmartScreen warns, choose More info > Run anyway.
@@ -94,7 +115,7 @@ Change them in the menu (<kbd>Esc</kbd>, or View / Select on a pad).
 | <kbd>I</kbd> <kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd> | Player 2: move |
 | <kbd>B</kbd> <kbd>N</kbd> <kbd>M</kbd> | Player 2: guard, punch, kick |
 | <kbd>2</kbd> | Player 2: start |
-| <kbd>Esc</kbd> | Menu: display, sound, game, controls, quit |
+| <kbd>Esc</kbd> | Menu: display (render scale, picture shape, antialiasing, 3D renderer...), sound, game, controls, quit |
 | <kbd>P</kbd> | Pause |
 | <kbd>F3</kbd> | Reset |
 | <kbd>F5</kbd> / <kbd>F6</kbd> | Render scale / picture shape |
@@ -115,6 +136,14 @@ Fujitsu MB86233 TGP, the rasterizer, the System 24 tile chip, the sound board (6
 board, all from MAME's code. An SDL 3 host draws the picture at any scale and shape and fills in the frames between
 the arcade's for smooth motion.
 
+The 3D can also be drawn on the GPU (`src/gpu`): Metal on a Mac, and SDL_GPU compute (Direct3D 12 or Vulkan) on
+Windows and Linux. The GPU doesn't use the usual depth buffer: the polygons are drawn in the game's own order, the
+order standing in for depth, by a compute rasteriser that follows the CPU renderer's arithmetic step for step
+(integer division, no fused multiply-adds, float-to-integer conversion as on x86), so its picture is the CPU's pixel
+for pixel. When the game starts it draws a test scene both ways and compares them, then checks its first pictures of
+the game itself; any difference, error or missing driver and it uses the CPU for that run. Auto (the default)
+then picks the GPU unless it's clearly slower than the CPU on that machine.
+
 ## Repository layout
 
 | Path | Contents |
@@ -123,6 +152,8 @@ the arcade's for smooth motion.
 | `src/machine` | Model 1: memory map, interrupts, TGP, rasterizer, tile chip, sound and I/O boards, smooth motion |
 | `src/rt` | the recompiler's runtime, and the recompile done on the player's machine (SLJIT) |
 | `src/host` | the SDL 3 host: window, input, pacing, the RmlUi menu |
+| `src/gpu` | the GPU renderer for the 3D: Metal (`gpu3d_metal.mm`), SDL_GPU (`gpu3d_sdlgpu.cpp`), its HLSL compute shaders (`gpu3d.hlsl`) and their compiled SPIR-V / DXIL (`gpu3d_shaders.h`) |
+| `tools/gpu/shaders.sh` | compiles `gpu3d.hlsl` into `gpu3d_shaders.h` with DXC |
 | `assets/` | `vf_map.txt` (function addresses), the app icon, the menu (`ui/`) and its font |
 | `third_party/` | MAME code, Musashi, ymfm, SLJIT, the Z80 core, RmlUi, GLM, stb_image |
 | `tools/recomp` | the ahead-of-time recompiler (V60 to C++), for development |

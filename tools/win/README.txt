@@ -20,8 +20,20 @@ FIRST LAUNCH
 3. It asks for your vf.zip. Choose it. It's copied into
    %APPDATA%\Virtua Fighter Recomp\roms, so you only do this once.
 
-Prefer to keep everything in one folder? Make a "roms" folder next to VirtuaFighter.exe and put
-vf.zip in it: settings and saves then stay in that folder too.
+Prefer to keep everything in the game's folder (portable)? Put a file named portable.txt next to
+VirtuaFighter.exe (an empty one will do: right-click > New > Text Document, and name it
+portable). The game then keeps everything in its own folder and nothing in %APPDATA%: settings,
+saves, screenshots, log.txt, and your vf.zip, which it asks for once and copies into its "roms"
+folder. (A "roms" folder next to VirtuaFighter.exe with vf.zip in it keeps the rest there too,
+but a copy of the zips also goes to %APPDATA%, so a new version unzipped elsewhere finds them.)
+
+Keep your ROMs in a folder of your own? Add a line to settings.ini (in the data folder, or next
+to VirtuaFighter.exe in portable mode):  roms_folder = D:\ROMs\vf
+or give it to the program: a shortcut whose Target ends in  --roms "D:\ROMs\vf"  (or set the
+environment variable VF_ROMS). The command line wins, then VF_ROMS, then settings.ini. The game looks
+there first for vf.zip (and model1io.zip, if you have it) and only reads it; log.txt says which folder it used, or where it
+looked when the zip isn't there (it then looks in the usual places, and a zip you then choose is
+copied into your ROM folder).
 
 
 CONTROLS (change them in the menu: Esc, or View/Select on a pad)
@@ -39,11 +51,15 @@ Display: render scale (up to 6x), antialiasing, picture shape (fits the window: 
 ultrawide), background filter, fullscreen. Sound: volume, music, effects and voices.
 Game: play style (PC: free play, no boot screen / arcade: coins and credits), reset.
 Controls: each player's pad, keys and buttons.
+3D renderer: Auto (the default) draws the 3D on the graphics card, the same picture as the CPU,
+unless it is clearly slower on your machine; GPU or CPU to choose yourself. If the GPU ever
+draws differently or fails, the game uses the CPU for that run (log.txt says so).
 
 
 YOUR FILES
 Settings, saves (rankings, the operator settings) and your ROMs are in
-%APPDATA%\Virtua Fighter Recomp (or next to the program, with a "roms" folder there). Put replacement stage skies in its
+%APPDATA%\Virtua Fighter Recomp (or next to the program, with a portable.txt or a "roms" folder
+there). Put replacement stage skies in its
 "backgrounds" folder (stage_beach_clouds.png and so on) to have them used instead of the originals.
 
 

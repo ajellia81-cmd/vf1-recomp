@@ -21,6 +21,19 @@ FIRST LAUNCH
 3. It asks for your vf.zip. Choose it. It's copied into
    ~/Library/Application Support/Virtua Fighter Recomp/roms, so you only do this once.
 
+Prefer to keep everything in the game's folder (portable)? Put a file named portable.txt next to
+the app, in the same folder (an empty one will do). The game then keeps everything in that folder
+and nothing in ~/Library/Application Support: settings, saves, screenshots, log.txt, and your
+vf.zip, which it asks for once and copies into a "roms" folder there. (An app that hasn't been
+moved since it was downloaded runs from a hidden copy that can't see the file: move it with the
+Finder first.)
+
+Keep your ROMs in a folder of your own? Add a line to settings.ini (in the data folder above, or
+beside the app in portable mode):  roms_folder = ~/ROMs/vf
+or start it from Terminal:  open "Virtua Fighter Recomp.app" --args --roms ~/ROMs/vf
+(or set VF_ROMS). The game looks there first for vf.zip (and model1io.zip, if you have it) and only reads it; log.txt says which
+folder it used, or where it looked when the zip isn't there (it then looks in the usual place).
+
 
 CONTROLS (change them in the menu: Esc, or View/Select on a pad)
 Keyboard, player 1:  arrows move   Z guard   X punch   C kick   1 start
@@ -38,11 +51,14 @@ Display: render scale (up to 6x), antialiasing, picture shape (fits the window: 
 ultrawide), background filter, fullscreen. Sound: volume, music, effects and voices.
 Game: play style (PC: free play, no boot screen / arcade: coins and credits), reset.
 Controls: each player's pad, keys and buttons.
+3D renderer: Auto (the default) draws the 3D on the graphics card, the same picture as the CPU,
+unless it is clearly slower on your machine; GPU or CPU to choose yourself. If the GPU ever
+draws differently or fails, the game uses the CPU for that run (log.txt says so).
 
 
 YOUR FILES
 Settings, saves (rankings, the operator settings) and your ROMs are in
-~/Library/Application Support/Virtua Fighter Recomp. Put replacement stage skies in its
+~/Library/Application Support/Virtua Fighter Recomp (or beside the app, with a portable.txt there). Put replacement stage skies in its
 "backgrounds" folder (stage_beach_clouds.png and so on) to have them used instead of the originals.
 
 

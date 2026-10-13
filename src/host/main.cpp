@@ -37,6 +37,14 @@
 #include <set>
 #include <cstring>
 
+// Every message box goes through here: a test run (VF_HIDDEN) never shows one (nor a file picker),
+// the message goes to stderr (log.txt without a console) instead.
+static bool message_box(SDL_MessageBoxFlags flags, const char *title, const std::string &msg)
+{
+	if (getenv("VF_HIDDEN")) { fprintf(stderr, "(hidden: no dialog) %s\n", msg.c_str()); return false; }
+	return SDL_ShowSimpleMessageBox(flags, title, msg.c_str(), nullptr);
+}
+
 namespace {
 
 constexpr double FRAME_HZ = 16000000.0 / (656.0 * 424.0);
@@ -319,7 +327,10 @@ bool save_blob(const std::string &path, const uint8_t *src, size_t n)
 struct settings
 {
 	int scale = 2, aspect = 0, volume = 100, music = 100, effects = 100, aa = 1, filter = 0, ring = 0;
+	int renderer3d = 2;     // the 3D's renderer: 0 the CPU, 1 the GPU, 2 Auto (whichever is quicker here)
+	std::string auto_3d;    // Auto's findings, per render scale and antialiasing ("3x1:g,2x0:c")
 	int arcade_coin = -1;   // Arcade mode's coin/credit setting, kept while PC mode makes it free play (-1: not seen yet)
+	std::string roms_folder;   // where the player keeps vf.zip (roms_folder = ...; read before the game starts, kept as written)
 	bool fullscreen = false, timings = false, arcade = false, smooth_bg = false, show_fps = false;
 	player_controls ctl[2] = { player_controls::defaults(0), player_controls::defaults(1) };
 
@@ -328,9 +339,9 @@ struct settings
 		FILE *f = fopen(path.c_str(), "r");
 		if (!f) return;
 		std::map<std::string, std::string> kv;
-		char line[256], key[64], val[160];
+		char line[1100], key[64], val[1024];
 		while (fgets(line, sizeof line, f))
-			if (sscanf(line, " %63[a-z0-9_] = %159[^\r\n]", key, val) == 2) kv[key] = val;
+			if (sscanf(line, " %63[a-z0-9_] = %1023[^\r\n]", key, val) == 2) kv[key] = val;
 		fclose(f);
 		auto num = [&](const char *k, int &v, int lo, int hi) {
 			auto it = kv.find(k);
@@ -352,6 +363,9 @@ struct settings
 		flag("background_filter", smooth_bg);
 		flag("show_fps", show_fps);
 		num("arcade_coins", arcade_coin, -1, 0xffff);
+		num("renderer_3d", renderer3d, 0, 2);
+		if (auto it = kv.find("auto_3d"); it != kv.end()) auto_3d = it->second;
+		if (auto it = kv.find("roms_folder"); it != kv.end()) roms_folder = it->second;
 		for (int p = 0; p < 2; p++) ctl[p].load(kv, p);
 	}
 
@@ -365,6 +379,9 @@ struct settings
 				"background_filter = %d\nmusic_volume = %d\neffects_volume = %d\nantialiasing = %d\nshow_fps = %d\nscreen_filter = %d\nring_size = %d\n", scale, aspect,
 				int(fullscreen), int(timings), volume, int(arcade), int(smooth_bg), music, effects, aa, int(show_fps), filter, ring);
 		if (arcade_coin >= 0) fprintf(f, "arcade_coins = %d\n", arcade_coin);
+		fprintf(f, "renderer_3d = %d\n", renderer3d);
+		if (!auto_3d.empty()) fprintf(f, "auto_3d = %s\n", auto_3d.c_str());
+		if (!roms_folder.empty()) fprintf(f, "roms_folder = %s\n", roms_folder.c_str());
 		for (int p = 0; p < 2; p++) ctl[p].save(f, p);
 		const bool flushed = flush_to_disk(f);
 		if (fclose(f) == 0 && flushed) replace_file(path, tmp);
@@ -403,11 +420,16 @@ static bool copy_whole(const std::filesystem::path &from, const std::filesystem:
 	return ok;
 }
 
-bool first_launch(const std::string &data, const std::string &keep, model1::regions &out)
+// The player's ROM folder (--roms, VF_ROMS or settings.ini's roms_folder: `folder`) is looked in
+// first and only read: nothing is copied out of it or kept elsewhere. Without the set there, the
+// usual places are tried next; a set chosen with the picker then is copied into that folder (where
+// the next start looks), not into the data folder.
+bool first_launch(const std::string &data, const std::string &keep, const std::string &folder, model1::regions &out)
 {
 	namespace fs = std::filesystem;
-	const fs::path roms = fs::path(data) / "roms";
-	const fs::path kept = keep.empty() ? roms : fs::path(keep) / "roms";
+	const fs::path own = fs::path(data) / "roms";
+	const fs::path roms = folder.empty() ? own : fs::path(folder);       // (where a picked set is copied)
+	const fs::path kept = !folder.empty() || keep.empty() ? own : fs::path(keep) / "roms";
 	auto zips_in = [&](const fs::path &dir) {
 		std::vector<std::string> z;
 		std::error_code ec;
@@ -418,7 +440,7 @@ bool first_launch(const std::string &data, const std::string &keep, model1::regi
 	auto zips_here = [&] { return zips_in(roms); };
 	// a copy kept for the next update (when it isn't there already, or is another set)
 	auto keep_copy = [&] {
-		if (kept == roms) return;
+		if (kept == roms || !folder.empty()) return;
 		std::error_code ec;
 		fs::create_directories(kept, ec);
 		for (const char *name : { "vf.zip", "model1io.zip" }) {
@@ -430,6 +452,14 @@ bool first_launch(const std::string &data, const std::string &keep, model1::regi
 	};
 	std::vector<std::string> have = zips_here();
 	std::string problem;
+	if (!folder.empty()) {
+		if (have.empty()) {
+			std::error_code ec;
+			fprintf(stderr, "ROM folder: no vf.zip in %s%s: looking in %s next\n", roms.string().c_str(),
+					fs::is_directory(roms, ec) ? "" : " (no such folder)", own.string().c_str());
+			if (!(have = zips_in(own)).empty()) fprintf(stderr, "the game from %s\n", own.string().c_str());
+		} else fprintf(stderr, "the game from the ROM folder %s\n", roms.string().c_str());
+	}
 	if (!have.empty()) {
 		romset::result r = romset::load(have);
 		if (r.ok) { keep_copy(); out = std::move(r.regions); return true; }
@@ -443,12 +473,12 @@ bool first_launch(const std::string &data, const std::string &keep, model1::regi
 			fprintf(stderr, "the game kept in %s: %s\n", kept.string().c_str(), r.error.c_str());
 		}
 	}
-	if (getenv("VF_HIDDEN")) { fprintf(stderr, "no game found in %s (hidden: no picker)\n", roms.string().c_str()); return false; }   // testing
+	if (getenv("VF_HIDDEN")) { fprintf(stderr, "%sno game found in %s (hidden: no picker)\n", problem.c_str(), roms.string().c_str()); return false; }   // testing
 	SDL_Init(SDL_INIT_VIDEO);
 	const std::string where = "It's copied into " + roms.string() + ", so you only do this once.";
 	std::string note = problem + "Choose your copy of Virtua Fighter: MAME's \"vf\" set (vf.zip).\n\n" + where;
 	for (;;) {
-		if (!SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Virtua Fighter", note.c_str(), nullptr)) return false;
+		if (!message_box(SDL_MESSAGEBOX_INFORMATION, "Virtua Fighter", note)) return false;
 		struct pick { bool done = false, failed = false; std::vector<std::string> files; } chosen;
 		static const SDL_DialogFileFilter filters[] = { { "MAME ROM sets (zip)", "zip" } };
 		SDL_ShowOpenFileDialog([](void *ud, const char *const *list, int) {
@@ -463,7 +493,7 @@ bool first_launch(const std::string &data, const std::string &keep, model1::regi
 									+ roms.string();
 			std::error_code ec;
 			fs::create_directories(roms, ec);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Virtua Fighter", msg.c_str(), nullptr);
+			message_box(SDL_MESSAGEBOX_INFORMATION, "Virtua Fighter", msg);
 			return false;
 		}
 		if (chosen.files.empty()) return false;
@@ -485,6 +515,51 @@ bool first_launch(const std::string &data, const std::string &keep, model1::regi
 		if (r.ok) { keep_copy(); out = std::move(r.regions); return true; }
 		note = r.error + "\n\nChoose MAME's \"vf\" set (vf.zip).";
 	}
+}
+
+// A folder as the player writes it: "~" (or "~/...") is their home folder; quotes around it are
+// dropped; a relative one is taken from `base` (settings.ini's folder) or the current folder.
+std::string player_folder(std::string f, const std::string &base = std::string())
+{
+	while (!f.empty() && (f.back() == ' ' || f.back() == '\t')) f.pop_back();
+	if (f.size() >= 2 && (f[0] == '"' || f[0] == '\'') && f.back() == f[0]) f = f.substr(1, f.size() - 2);
+	if (f.empty()) return f;
+	if (f[0] == '~' && (f.size() == 1 || f[1] == '/' || f[1] == '\\')) {
+		const char *h = getenv("HOME");
+		if (!h || !*h) h = getenv("USERPROFILE");
+		if (h && *h) f = std::string(h) + f.substr(1);
+	}
+	std::filesystem::path p(f);
+	std::error_code ec;
+	if (p.is_relative()) p = base.empty() ? std::filesystem::absolute(p, ec) : std::filesystem::path(base) / p;
+	p = p.lexically_normal();
+	if (!p.has_filename() && p.has_relative_path()) p = p.parent_path();   // (no separator at the end)
+	return p.string();
+}
+
+// The program's folder, with a separator at the end: a Mac app's is the folder the .app is in (SDL's
+// base path in an app is its Contents/Resources)
+std::string program_folder()
+{
+	const char *base = SDL_GetBasePath();
+	std::string b = base ? base : "";
+	const std::string in_app = ".app/Contents/Resources/";
+	if (b.size() > in_app.size() && b.compare(b.size() - in_app.size(), in_app.size(), in_app) == 0) {
+		b.resize(b.size() - in_app.size());   // (".../Virtua Fighter Recomp")
+		b.resize(b.find_last_of('/') + 1);
+	}
+	return b;
+}
+// Portable mode, as the player asks for it: a file named portable.txt beside the program (its name
+// as found, else null). Any contents; "portable" and Windows' portable.txt.txt (a New Text Document
+// renamed with its extension hidden) count too.
+const char *portable_marker(const std::string &folder)
+{
+	if (folder.empty()) return nullptr;
+	std::error_code ec;
+	for (const char *name : { "portable.txt", "portable", "portable.txt.txt" })
+		if (std::filesystem::is_regular_file(folder + name, ec)) return name;
+	return nullptr;
 }
 
 // The menu's files: next to the program in a package, else the source tree's assets/.
@@ -517,9 +592,12 @@ int main(int argc, char **argv)
 	// the command line wins over settings.ini, which is found in the data directory
 	int arg_scale = 0, arg_aspect = -1, arg_full = -1;
 	bool interp = false, arg_arcade = false;
+	std::string arg_roms;   // --roms <folder>: where the player's vf.zip is (over VF_ROMS and settings.ini's roms_folder)
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
 		if (a == "--scale" && i + 1 < argc) arg_scale = atoi(argv[++i]);
+		else if (a == "--roms" && i + 1 < argc) arg_roms = argv[++i];
+		else if (a.rfind("--roms=", 0) == 0) arg_roms = a.substr(7);
 		else if (a == "--interp") interp = true;      // MAME's V60 interpreter instead of the recompiled code
 		else if (a == "--arcade") arg_arcade = true;  // boot screen, credits and coins as on the cabinet
 		else if (a == "--aspect" && i + 1 < argc) {
@@ -527,32 +605,47 @@ int main(int argc, char **argv)
 			for (int k = 0; k < N_ASPECTS; k++) if (v == ASPECT_NAMES[k]) arg_aspect = k;
 		} else if (a == "--fullscreen") arg_full = 1;
 		else if (a == "--window") arg_full = 0;
-		else dir = a;
+		else if (a.rfind("-psn_", 0) == 0) {}   // (an old macOS's Finder adds its process number)
+		else if (a.rfind("--", 0) == 0) { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
+		else {
+			// a regions folder named on the command line: one that's there (a stray word, say a value
+			// after an option that takes none, was taken as the folder)
+			std::error_code ec;
+			if (!std::filesystem::is_directory(a, ec)) { fprintf(stderr, "%s: no such folder (options start with --)\n", a.c_str()); return 2; }
+			dir = a;
+		}
 	}
 	// Where the game comes from: a regions folder (our own builds, tools/romset.py: build/vf by
 	// default), else the player's zips in their own data folder, which also holds the settings,
 	// saves and backgrounds/.
 	if (const char *sc = getenv("VF_SCRIPT")) load_script(sc);
 	model1::regions game;
+	const char *portable = nullptr;   // (portable mode: the marker's name)
 	{
 		std::error_code ec;
 		if (std::filesystem::exists(dir + "/maincpu.bin", ec)) {
 			game = load_regions(dir);
 		} else {
-			// portable: a "roms" folder next to the program (the Steam Deck package) keeps
-			// everything there; else the player's data folder
+			// portable mode (a file named portable.txt beside the program, or beside a Mac's .app)
+			// keeps everything in the program's folder and nothing anywhere else: not even the
+			// user data folder made (SDL_GetPrefPath makes it), nor a copy of the zips kept there.
+			// Else a "roms" folder next to the program (the Steam Deck package) keeps the rest
+			// there, the zips also kept in the player's data folder; else the player's data folder.
 			const char *base = SDL_GetBasePath();
 			const std::string here = base ? std::string(base) : std::string();
-			char *pref = SDL_GetPrefPath(nullptr, "Virtua Fighter Recomp");
+			const std::string home = program_folder();
+			portable = portable_marker(home);
+			char *pref = portable ? nullptr : SDL_GetPrefPath(nullptr, "Virtua Fighter Recomp");
 			std::string keep = pref ? pref : "";                                 // (the zips kept across updates)
 			if (getenv("VF_DATA")) keep.clear();                                 // (testing: the player's own left alone)
-			if (const char *k = getenv("VF_KEEP")) keep = k;                    // testing: another user's data folder
+			if (const char *k = getenv("VF_KEEP"); k && !portable) keep = k;     // testing: another user's data folder
 			if (getenv("VF_DATA")) dir = getenv("VF_DATA");                     // testing
+			else if (portable) dir = home;
 			else if (!here.empty() && std::filesystem::is_directory(here + "roms", ec)) dir = here;
 			else dir = pref ? pref : ".";
 			SDL_free(pref);
 			while (!keep.empty() && keep.back() == '/') keep.pop_back();
-			while (!dir.empty() && dir.back() == '/') dir.pop_back();
+			while (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\') && dir[dir.size() - 2] != ':') dir.pop_back();   // (but a drive's root)
 			// A player's build has no console (a Mac app, a Windows GUI program, a Steam shortcut):
 			// its messages go to log.txt in the data folder instead, for when something goes wrong.
 			if (!isatty(fileno(stderr))) {
@@ -560,7 +653,21 @@ int main(int argc, char **argv)
 				freopen((dir + "/log.txt").c_str(), "w", stderr);
 				setvbuf(stderr, nullptr, _IONBF, 0);
 			}
-			if (!first_launch(dir, keep == dir ? std::string() : keep, game)) return 0;
+			if (portable) fprintf(stderr, "portable (%s beside the program): everything in %s\n", portable, dir.c_str());
+			else if (home.find("/AppTranslocation/") != std::string::npos)   // (macOS runs a downloaded app from a hidden copy until it's moved)
+				fprintf(stderr, "run from macOS's hidden copy of the app (App Translocation): a portable.txt beside it isn't seen until the app is moved with the Finder\n");
+			// the player's ROM folder: the command line's, else VF_ROMS, else settings.ini's
+			std::string roms_folder, from;
+			if (!arg_roms.empty()) roms_folder = player_folder(arg_roms), from = "--roms";
+			else if (const char *e = getenv("VF_ROMS"); e && *e) roms_folder = player_folder(e), from = "VF_ROMS";
+			else {
+				settings pre;
+				pre.load(dir + "/settings.ini");
+				if (!pre.roms_folder.empty()) roms_folder = player_folder(pre.roms_folder, dir), from = "settings.ini";
+			}
+			if (!roms_folder.empty()) fprintf(stderr, "ROM folder (%s): %s\n", from.c_str(), roms_folder.c_str());
+			else fprintf(stderr, "ROM folder: %s\n", (std::filesystem::path(dir) / "roms").string().c_str());
+			if (!first_launch(dir, keep == dir ? std::string() : keep, roms_folder, game)) return getenv("VF_HIDDEN") ? 1 : 0;   // (a test run without the game: an error)
 		}
 	}
 	const std::string settings_path = dir + "/settings.ini";
@@ -577,6 +684,11 @@ int main(int argc, char **argv)
 	if (arg_full >= 0) cfg.fullscreen = arg_full;
 	if (arg_arcade) cfg.arcade = true;
 	g_pc_mode = !cfg.arcade;
+	// the 3D's renderer: VF_3D=cpu|gpu|auto (tests) over the setting
+	if (const char *r = getenv("VF_3D")) cfg.renderer3d = !strcmp(r, "cpu") ? 0 : !strcmp(r, "gpu") ? 1 : 2;
+#if VF_GPU3D_METAL
+	gpu3d_metal_prewarm();   // (its shaders compiled while the game boots: ready if the menu or Auto picks it)
+#endif
 	int aspect_i = cfg.aspect;
 	const bool fullscreen = cfg.fullscreen;
 	const int scale = cfg.scale;
@@ -622,7 +734,7 @@ int main(int argc, char **argv)
 			const std::string why = "Couldn't recompile the game (" + find_assets() + "/vf_map.txt missing or unusable, "
 									"or no executable memory): running it on the slower interpreter instead.";
 			fprintf(stderr, "%s\n", why.c_str());
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Virtua Fighter", why.c_str(), nullptr);
+			message_box(SDL_MESSAGEBOX_WARNING, "Virtua Fighter", why);
 			rec::detach(m.cpu());
 			interp = true;
 			m.run_cpu = nullptr;
@@ -675,7 +787,7 @@ int main(int argc, char **argv)
 	auto fail = [](const char *what) {
 		const std::string msg = std::string(what) + ": " + SDL_GetError();
 		fprintf(stderr, "%s\n", msg.c_str());
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Virtua Fighter", msg.c_str(), nullptr);
+		message_box(SDL_MESSAGEBOX_ERROR, "Virtua Fighter", msg);
 		return 1;
 	};
 #ifdef _WIN32
@@ -786,6 +898,195 @@ int main(int argc, char **argv)
 		if (gpu_2d) fprintf(stderr, "pictures put together on the GPU (renderer: %s)\n", rname ? rname : "?");
 		else fprintf(stderr, "pictures drawn on the CPU (renderer: %s; %s)\n", rname ? rname : "?", why.c_str());
 	}
+	// The 3D on the GPU (src/gpu/gpu3d.h, Display > 3D renderer): on the device SDL's Metal renderer
+	// draws with; off the Mac SDL_GPU's (Direct3D 12 or Vulkan), a device of its own, made only when
+	// the setting isn't CPU (VF_3D=cpu|gpu|auto over it), its pictures checked against the CPU's
+	// before they're trusted. Any other renderer, or no GPU: the CPU's.
+	std::unique_ptr<gpu3d> g3;
+	bool g3_next_start = false;   // (SDL_GPU: none made, the setting CPU as the game started)
+#if VF_GPU3D_METAL
+	{
+		const char *rname = SDL_GetRendererName(ren);
+		if (rname && !strcmp(rname, "metal")) g3 = gpu3d_create_metal_layer(SDL_GetRenderMetalLayer(ren));
+		if (!g3) fprintf(stderr, "the 3D on the CPU: no GPU for it here (renderer: %s)\n", rname ? rname : "?");
+	}
+#elif VF_GPU3D_SDL
+	{
+		if (cfg.renderer3d != 0) {
+			const uint64_t t0 = SDL_GetTicksNS();
+			g3 = gpu3d_create_sdlgpu();
+			fprintf(stderr, "the 3D on the GPU: %s (%.0f ms to start)\n", g3 ? g3->name() : "none here (the CPU's 3D)", (SDL_GetTicksNS() - t0) / 1e6);
+		} else {
+			g3_next_start = true;
+			fprintf(stderr, "the 3D on the CPU (the setting): the GPU's from the next start if chosen\n");
+		}
+	}
+#else
+	fprintf(stderr, "the 3D on the CPU: no GPU 3D in this build\n");
+#endif
+	if (g3) {
+		if (const char *r = getenv("GPU3D_REPEAT")) g3->test_repeat = std::max(1, atoi(r));   // tests: a slow GPU
+		m.set_gpu3d(g3.get());
+		if (const char *c = getenv("VF_GPU3D_CHECK")) m.m_gpu3d_check = std::max(0, atoi(c));
+#if VF_GPU3D_SDL
+		m.m_gpu3d_verify = 3;   // (the game's pictures: three checked against the CPU's)
+#endif
+	}
+	// Auto: the GPU, unless clearly slower with the frame at risk (auto_gpu below). Measured before the first picture, unseen (a made-up fight's worth of polygons, a few
+	// times each way), and again whenever the scale or antialiasing changes; then checked on the
+	// game's own pictures every 10 s, four pictures drawn the other way (the first not counted) (the two ways' pictures are
+	// the same pixels, so a switch shows nothing). What it found is kept in settings.ini per scale
+	// and antialiasing, the start's guess until it has measured. Any GPU error: the CPU for the run.
+	struct auto3d_state {
+		bool gpu = false;              // the GPU in use (Auto's choice, or GPU)
+		bool broken = false;           // a GPU error: the CPU for the run
+		std::vector<double> c, g;      // the last pictures' times each way (ms)
+		int probe = 0;                 // pictures still to draw the other way
+		uint64_t next = 0;             // the next check (ns)
+		uint64_t failed = 0;
+		bool tested = false;           // SDL_GPU: its test picture checked against the CPU's
+	} a3;
+	auto auto_key = [&] { return std::to_string(cfg.scale) + "x" + std::to_string(cfg.aa); };
+	auto auto_remember = [&](bool gpu) {
+		const std::string k = auto_key() + ":";
+		std::string out;
+		size_t i = 0;
+		while (i < cfg.auto_3d.size()) {
+			size_t j = cfg.auto_3d.find(',', i);
+			if (j == std::string::npos) j = cfg.auto_3d.size();
+			const std::string e = cfg.auto_3d.substr(i, j - i);
+			if (!e.empty() && e.compare(0, k.size(), k)) out += (out.empty() ? "" : ",") + e;
+			i = j + 1;
+		}
+		cfg.auto_3d = out + (out.empty() ? "" : ",") + k + (gpu ? "g" : "c");
+	};
+	auto auto_recalled = [&]() -> int {   // -1 none, 0 the CPU, 1 the GPU
+		const std::string k = auto_key() + ":";
+		const size_t at = ("," + cfg.auto_3d).find("," + k);
+		if (at == std::string::npos) return -1;
+		const size_t v = at + k.size();
+		return v < cfg.auto_3d.size() ? (cfg.auto_3d[v] == 'g') : -1;
+	};
+	// Auto prefers the GPU: the CPU only when the GPU is clearly slower in a way that matters, over
+	// 1.5x the CPU's time and over half a frame (8 ms of the 16.7), so the frame's time is at risk
+	// (a GPU a little slower than a fast Mac's CPU, well inside the frame, is still the GPU). Back
+	// to the GPU once it's within 1.3x or under 6 ms.
+	auto auto_gpu = [](bool was, double c, double g) {
+		return was ? !(g > 1.5 * c && g > 8.0) : (g <= 1.3 * c || g < 6.0);
+	};
+	auto apply_3d = [&] { m.set_gpu3d_on(g3 && !a3.broken && a3.gpu); };
+	auto renderer_name = [&]() -> std::string {
+#if VF_GPU3D_METAL
+		if (!g3 || a3.broken) return "CPU (no GPU here)";
+#elif VF_GPU3D_SDL
+		if (!g3 && g3_next_start && cfg.renderer3d) return cfg.renderer3d == 2 ? "Auto (from the next start)" : "GPU (from the next start)";
+		if (!g3 || a3.broken) return "CPU (no GPU here)";
+#else
+		if (!g3 || a3.broken) return "CPU (no GPU 3D in this build)";
+#endif
+		if (cfg.renderer3d == 2) return a3.gpu ? "Auto (GPU)" : "Auto (CPU)";
+		return cfg.renderer3d == 1 ? "GPU" : "CPU";
+	};
+	// Auto's measure, before the first picture and at each new scale or antialiasing
+	auto auto_measure = [&](const char *why) {
+		if (!g3 || a3.broken) {
+			a3.gpu = false; apply_3d();
+			fprintf(stderr, "3D renderer: %s (%s): the CPU (no GPU 3D here)\n", cfg.renderer3d == 2 ? "Auto" : cfg.renderer3d ? "GPU" : "CPU", why);
+			return;
+		}
+#if VF_GPU3D_SDL
+		// (SDL_GPU: its picture of the test scene checked against the CPU's before it's used)
+		if (cfg.renderer3d != 0 && !a3.tested) {
+			a3.tested = true;
+			double c = 0, g = 0;
+			long long d = -1;
+			if (!m.bench3d(1, c, g, &d) || d != 0) {
+				a3.broken = true; a3.gpu = false; apply_3d();
+				if (d > 0) fprintf(stderr, "the 3D on the GPU: its test picture isn't the CPU's (%lld pixels differ): the CPU for this run\n", d);
+				else fprintf(stderr, "the 3D on the GPU: its test picture failed: the CPU for this run\n");
+				return;
+			}
+			fprintf(stderr, "the 3D on the GPU: its test picture is the CPU's, pixel for pixel\n");
+		}
+#endif
+		if (cfg.renderer3d != 2) {
+			a3.gpu = cfg.renderer3d == 1; apply_3d();
+			fprintf(stderr, "3D renderer: the player's setting (%s): the %s\n", why, a3.gpu ? "GPU" : "CPU");
+			return;
+		}
+		const int recalled = auto_recalled();
+		const uint64_t t0 = SDL_GetTicksNS();
+		double c = 0, g = 0;
+		if (!m.bench3d(5, c, g)) {
+			a3.broken = true;
+			fprintf(stderr, "3D renderer: Auto: the GPU failed its measure: the CPU for this run\n");
+		} else {
+			if (const char *k = getenv("GPU3D_SLOW_MS")) g += atof(k);   // tests: a slow GPU (each picture this much longer)
+			a3.gpu = auto_gpu(true, c, g);
+			auto_remember(a3.gpu);
+			fprintf(stderr, "3D renderer: Auto (%s) at %dx, antialiasing %d: the CPU %.2f ms, the GPU %.2f ms a picture: the %s (%.0f ms measuring; last time: %s)\n",
+					why, cfg.scale, cfg.aa, c, g, a3.gpu ? "GPU" : "CPU", (SDL_GetTicksNS() - t0) / 1e6,
+					recalled < 0 ? "none" : recalled ? "the GPU" : "the CPU");
+		}
+		a3.c.clear(); a3.g.clear(); a3.probe = 0;
+		a3.next = SDL_GetTicksNS() + 10000000000ull;
+		apply_3d();
+	};
+	// after each picture: its time; Auto's checks
+	auto auto_tick = [&] {
+		if (!g3) return;
+		const model1::gpu3d_stats &st = m.m_g3;
+		if (st.failed != a3.failed) {
+			a3.failed = st.failed;
+			if (!a3.broken) fprintf(stderr, "3D renderer: the GPU failed: the CPU for this run\n");
+			a3.broken = true;
+			a3.gpu = false;
+			apply_3d();
+			return;
+		}
+		if (st.ms <= 0.01) return;   // (no 3D)
+		{   // every 10 s, to the log: the 3D's time a picture
+			static uint64_t since = SDL_GetTicksNS();
+			static double sum[2] = {}, gsum = 0, rsum = 0; static int n[2] = {};
+			sum[st.gpu] += st.ms; n[st.gpu]++;
+			if (st.gpu) { gsum += st.gpu_ms; rsum += st.rec_ms; }
+			if (SDL_GetTicksNS() - since >= 10000000000ull) {
+				fprintf(stderr, "the 3D: %s", renderer_name().c_str());
+				for (int k = 1; k >= 0; k--) if (n[k]) fprintf(stderr, ", the %s %.2f ms a picture (%d)", k ? "GPU" : "CPU", sum[k] / n[k], n[k]);
+				if (n[1]) fprintf(stderr, " [GPU: recording %.2f ms, on the GPU %.2f ms]", rsum / n[1], gsum / n[1]);
+				if (m.m_g3.checked) fprintf(stderr, ", checked %llu, %llu differ", (unsigned long long)m.m_g3.checked, (unsigned long long)m.m_g3.differ);
+				fprintf(stderr, "\n");
+				since = SDL_GetTicksNS(); sum[0] = sum[1] = gsum = rsum = 0; n[0] = n[1] = 0;
+			}
+		}
+		const double ms = st.ms + (st.gpu ? std::max(0.0, getenv("GPU3D_SLOW_MS") ? atof(getenv("GPU3D_SLOW_MS")) : 0.0) : 0.0);
+		auto &v = st.gpu ? a3.g : a3.c;
+		if (a3.probe != 4) {   // (a check's first picture the other way is left out: a GPU idle a while is slow to wake)
+			v.push_back(ms);
+			if (v.size() > 9) v.erase(v.begin());
+		}
+		if (cfg.renderer3d != 2 || a3.broken) return;
+		if (a3.probe > 0) {
+			if (--a3.probe == 0) {
+				auto med = [](std::vector<double> x) { std::sort(x.begin(), x.end()); return x[x.size() / 2]; };
+				const bool was = a3.gpu;
+				if (!a3.c.empty() && !a3.g.empty()) {
+					const double c = med(a3.c), g = med(a3.g);
+					a3.gpu = auto_gpu(was, c, g);   // (the GPU unless clearly slower and the frame at risk)
+					if (a3.gpu != was) {
+						auto_remember(a3.gpu);
+						fprintf(stderr, "3D renderer: Auto's check: the CPU %.2f ms, the GPU %.2f ms a picture: now the %s\n", c, g, a3.gpu ? "GPU" : "CPU");
+					} else if (getenv("VF_LOG_AUTO3D"))
+						fprintf(stderr, "3D renderer: Auto's check: the CPU %.2f ms, the GPU %.2f ms a picture: the %s still\n", c, g, a3.gpu ? "GPU" : "CPU");
+				}
+				a3.next = SDL_GetTicksNS() + 10000000000ull;
+			}
+			m.set_gpu3d_on(a3.probe > 0 ? !a3.gpu : a3.gpu);
+			return;
+		}
+		if (SDL_GetTicksNS() >= a3.next) { a3.probe = 4; m.set_gpu3d_on(!a3.gpu); }
+	};
+	auto_measure("the start");
 	std::set<int> gpu_failed;           // render scales the GPU couldn't put together (a part too large for it)
 	int gpu_verified = 0;               // the game's own pictures checked so far (the 1st, 60th and 600th)
 	model1::gpu_parts parts;
@@ -991,9 +1292,9 @@ int main(int argc, char **argv)
 		float hz = 0;
 		if (const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(win))) hz = dm->refresh_rate;
 		const char *rn = SDL_GetRendererName(ren);
-		fprintf(stderr, "render state (%s): %dx (drawn at %dx), antialiasing %s, %s, the 2D on the %s (%s), smooth pictures %s, governor %s, vsync %d, screen %.2f Hz, window %d x %d\n",
+		fprintf(stderr, "render state (%s): %dx (drawn at %dx), antialiasing %s, %s, the 3D: %s, the 2D on the %s (%s), smooth pictures %s, governor %s, vsync %d, screen %.2f Hz, window %d x %d\n",
 				why, cfg.scale, m.render_scale(), cfg.aa == 0 ? "Low" : aa_now() > 1 ? (aa_now() == 2 ? "2x" : "3x") : "off",
-				aspect_i ? ASPECT_NAMES[aspect_i] : "fit", gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale()) ? "GPU" : "CPU",
+				aspect_i ? ASPECT_NAMES[aspect_i] : "fit", renderer_name().c_str(), gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale()) ? "GPU" : "CPU",
 				rn ? rn : "?", smooth_gap_ns < 16666666 ? "each refresh" : "60 a second",
 				((!getenv("VF_HIDDEN") && !getenv("VF_QUIT_AFTER")) || getenv("VF_GOVERN")) ? "on" : "off", vsync, hz, pw, ph);
 	};
@@ -1036,6 +1337,7 @@ int main(int argc, char **argv)
 		m.set_edge_aa(cfg.aa == 0);
 		m.set_smooth(true);
 		sync.reset();                          // a new picture size: show the next frame as it is
+		auto_measure("a new scale or antialiasing");
 		make_texture(); present_shape(); redraw_if_stopped();
 		log_state(by_player ? "the player's scale or antialiasing" : "the governor's");
 	};
@@ -1067,6 +1369,17 @@ int main(int argc, char **argv)
 				while (i < 3 && order[i] != cfg.aa) i++;
 				cfg.aa = order[std::clamp(i + d, 0, 3)];
 				set_scale(cfg.scale);
+			} });
+		p.items.push_back({ "3D renderer",
+			"Which draws the 3D: the CPU, or the graphics card (GPU), with exactly the same picture. Auto uses the GPU unless it is too slow on this computer, checking again as you play.",
+			[&] { return renderer_name(); },
+			[&](int d) {
+				if (!g3 && g3_next_start) { cfg.renderer3d = wrap(cfg.renderer3d + d, 3); cfg_dirty = true; return; }   // (SDL_GPU: from the next start)
+				if (!g3) return;
+				cfg.renderer3d = wrap(cfg.renderer3d + d, 3); cfg_dirty = true;
+				auto_measure("chosen");
+				redraw_if_stopped();
+				log_state("the player's 3D renderer");
 			} });
 		p.items.push_back({ "Picture shape",
 			"Fit the window fills any screen shape. The other shapes add black bars to keep their shape; 4:3 is the original arcade screen. (F6)",
@@ -1667,6 +1980,7 @@ int main(int argc, char **argv)
 				perf.present += SDL_GetTicksNS() - tr;
 				perf.work += SDL_GetTicksNS() - tr;
 				show_frame = true;
+				auto_tick();
 			}
 		}
 		const uint64_t t1 = SDL_GetTicksNS();
@@ -1873,6 +2187,11 @@ int main(int argc, char **argv)
 
 	}
 
+	if (g3) fprintf(stderr, "the 3D at the end: %llu pictures drawn by the GPU, %llu checked against the CPU's, %llu differ; %llu drawn by the CPU instead, %llu GPU errors\n",
+					(unsigned long long)m.m_g3.pictures, (unsigned long long)m.m_g3.checked, (unsigned long long)m.m_g3.differ,
+					(unsigned long long)m.m_g3.cpu_fallback, (unsigned long long)m.m_g3.failed);
+	m.set_gpu3d(nullptr);
+	g3.reset();                          // (its device goes before SDL does)
 	if (gpu_check) fprintf(stderr, "gpu check: %d pictures put together on the GPU checked, %d differ\n", gpu_checked, gpu_differ);
 	gc.reset();                          // (its textures go before the renderer)
 	if (quit_after >= 0 && !getenv("VF_SAVE")) { SDL_Quit(); return 0; }   // test runs leave the saves and settings alone (VF_SAVE: they save, as a player's)

@@ -11,7 +11,7 @@ rm -rf build/release && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/
 cp build/rel/vf-native "$APP/Contents/MacOS/Virtua Fighter Recomp"
 cp -R assets/ui assets/fonts assets/backgrounds assets/vf_map.txt "$APP/Contents/Resources/assets/"
 cp assets/icon/VF1.icns "$APP/Contents/Resources/VF1.icns"
-VERSION=$(git describe --tags --always 2>/dev/null || echo dev)
+VERSION=${VF_VERSION:-$(git describe --tags --always 2>/dev/null || echo dev)}   # (VF_VERSION=v1.1.11 for a release)
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

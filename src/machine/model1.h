@@ -13,6 +13,7 @@
 #include "mame_lite.h"
 #include <map>
 #include "s24tile.h"
+#include "../gpu/gpu3d.h"
 #include "m1audio.h"
 #include "model1io.h"
 #include "../core/v60_device.h"
@@ -449,6 +450,29 @@ public:
 	// (the stages' own see-through polygons keep the arcade's order: the floor covers them)
 	static bool fighter_shadow(const quad_t &q) { return (q.col & 0x01000000) && !stage_model(q.obj); }   // 0x01000000: MOIRE
 	static int s_depth_pass;       // 1 while painting with the shadow test
+
+	// ---- the 3D on the GPU (src/gpu/gpu3d.h; the host's Display > 3D renderer) ----
+	// While on, each picture's polygons are recorded as draw_quads would draw them and drawn by the
+	// GPU into the same bitmap at the end of the 3D (gpu3d_end); anything it can't (a wireframe
+	// line, a vertex that isn't a number) or a GPU error: that picture drawn by the CPU from the
+	// recording. Off: the CPU's way, untouched.
+	void set_gpu3d(gpu3d *g) { m_gpu3d = g; }
+	void set_gpu3d_on(bool on) { m_gpu3d_on = on; }
+	bool gpu3d_on() const { return m_gpu3d && m_gpu3d_on; }
+	struct gpu3d_stats {
+		double ms = 0;          // the last picture's 3D drawing, wall time (CPU: the rasterizer's; GPU: recorded to drawn)
+		double gpu_ms = 0;      // its GPU time
+		double rec_ms = 0;      // its recording's (GPU)
+		bool gpu = false;       // drawn by the GPU
+		int polys = 0;
+		uint64_t failed = 0, cpu_fallback = 0, checked = 0, differ = 0;   // errors; pictures the CPU drew instead; checks
+		uint64_t pictures = 0;  // drawn by the GPU
+	};
+	gpu3d_stats m_g3;
+	// Auto's measure (model1_video.cpp); differ: also the test picture drawn once more each way and
+	// compared, its pixels that differ
+	bool bench3d(int reps, double &cpu_ms, double &gpu_ms, long long *differ = nullptr);
+	int m_gpu3d_check = 0;     // tests (VF_GPU3D_CHECK=n): every n-th GPU picture drawn by the CPU too and compared
 private:
 	uint64_t m_frame = 0;
 
@@ -734,6 +758,7 @@ private:
 		void set_lightparam(int index, float diffuse, float ambient, float specular, int power);
 		void set_zoom(float x, float y);
 		void set_light_direction(float x, float y, float z);
+		static glm::vec3 light_vector(float x, float y, float z);
 		void set_translation_matrix(float* mat);
 		void set_view_translation(float x, float y);
 
@@ -804,6 +829,25 @@ private:
 	void        sort_quads() const;
 	void        unsort_quads() const;
 	void        draw_quads(bitmap_rgb32 &bitmap, const rectangle &cliprect);
+	void        raster_quads(bitmap_rgb32 &bitmap, view_t *view, int count);   // draw_quads' drawing (the CPU's)
+	// the GPU's recording (draw_quads in GPU mode)
+	gpu3d *m_gpu3d = nullptr;
+	bool m_gpu3d_on = false, m_rec = false, m_rec_bad = false;
+	struct rec_batch { int x1, x2, y1, y2; size_t first, count; };
+	std::vector<rec_batch> m_rec_batches;
+	std::vector<quad_t> m_rec_quads;
+	std::vector<point_t> m_rec_points;
+	std::vector<gpu3d_poly> m_rec_polys;
+	std::vector<gpu3d_span> m_rec_spans;
+	int m_rec_y0 = 0, m_rec_y1 = -1, m_rec_m0 = 0, m_rec_m1 = -1;
+	double m_raster_ms = 0, m_rec_ms = 0;
+	uint32_t m_rec_rows = 0;
+	bitmap_rgb32 m_check_cpu;
+	void record_quads(view_t *view, int count);
+	void gpu3d_begin(const bitmap_rgb32 &bitmap);
+	int m_bitmap_rec_w = 0, m_bitmap_rec_h = 0;
+	void gpu3d_end(bitmap_rgb32 &bitmap);
+	void rec_replay(bitmap_rgb32 &bitmap);
 	static void recompute_frustum(view_t *view);
 	static void draw_hline(bitmap_rgb32 &bitmap, int x1, int x2, int y, int color);
 	static void draw_hline_moired(bitmap_rgb32 &bitmap, int x1, int x2, int y, int color);
@@ -880,4 +924,9 @@ private:
 		int height() const { return SCREEN_H; }
 	} m_screen_obj{*this};
 	screen_t *m_screen = &m_screen_obj;
+public:
+	// The game's own pictures still to check against the CPU's before the GPU's are trusted (one
+	// every 60 with a fight's polygons): a difference is a failure (m_g3.failed: the CPU's then).
+	// (last: the members before it where they were)
+	int m_gpu3d_verify = 0;
 };

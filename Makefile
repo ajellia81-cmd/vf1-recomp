@@ -125,18 +125,36 @@ $(OBJ)/src/host/stb_image_impl.o: CXXFLAGS += -w
 $(OBJ)/src/host/main.o $(OBJ)/src/host/menu.o: CXXFLAGS += $(SDL_CFLAGS) $(RML_CFLAGS)
 $(OBJ)/src/host/main.o: $(OBJ)/version.h
 $(OBJ)/src/host/main.o: CXXFLAGS += -I$(OBJ)
-$(BIN)/vf: $(call objs,src/host/main.cpp src/host/menu.cpp src/host/romset.cpp src/host/stb_image_impl.cpp $(CORE) $(MACHINE) $(SOUND) $(RT) $(RML_SRC)) $(MUSASHI_OBJ) $(Z80_OBJ) $(patsubst %.S,$(OBJ)/%.o,$(CORO_ASM)) $(OBJ)/build/gen/vf_rec.o
+# The 3D on the GPU in the game (src/gpu, Display > 3D renderer): Metal for an Apple target; SDL_GPU
+# elsewhere (Direct3D 12 or Vulkan: gpu3d_sdlgpu.cpp, its shaders precompiled in gpu3d_shaders.h by
+# tools/gpu/shaders.sh); GPU3D=none: the CPU's only
+GPU3D ?= $(if $(findstring apple,$(shell $(CXX) -dumpmachine 2>/dev/null)),metal,sdlgpu)
+ifeq ($(GPU3D),metal)
+GPU3D_OBJ = $(OBJ)/src/gpu/gpu3d_metal.o
+GPU3D_LIBS = -framework Metal -framework Foundation -framework QuartzCore
+GPU3D_DEF = -DVF_GPU3D_METAL=1
+endif
+ifeq ($(GPU3D),sdlgpu)
+GPU3D_OBJ = $(OBJ)/src/gpu/gpu3d_sdlgpu.o
+$(OBJ)/src/gpu/gpu3d_sdlgpu.o: CXXFLAGS += $(SDL_CFLAGS)
+GPU3D_DEF = -DVF_GPU3D_SDL=1
+endif
+$(OBJ)/%.o: %.mm
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS) $(SDL_LIBS) $(FT_LIBS)
+	$(CXX) $(CXXFLAGS) -fobjc-arc -MMD -c $< -o $@
+$(OBJ)/src/host/main.o: CXXFLAGS += $(GPU3D_DEF)
+$(BIN)/vf: $(call objs,src/host/main.cpp src/host/menu.cpp src/host/romset.cpp src/host/stb_image_impl.cpp $(CORE) $(MACHINE) $(SOUND) $(RT) $(RML_SRC)) $(MUSASHI_OBJ) $(Z80_OBJ) $(patsubst %.S,$(OBJ)/%.o,$(CORO_ASM)) $(OBJ)/build/gen/vf_rec.o $(GPU3D_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS) $(SDL_LIBS) $(FT_LIBS) $(GPU3D_LIBS)
 
 # The release build: no generated C++ in it (nothing made from the ROM). The game is recompiled
 # to native code from the player's ROM when it starts (src/rt/native.cpp, assets/vf_map.txt).
 $(OBJ)/src/host/main_native.o: src/host/main.cpp $(OBJ)/version.h
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(SDL_CFLAGS) $(RML_CFLAGS) -I$(OBJ) -DVF_NATIVE -MMD -c $< -o $@
-$(BIN)/vf-native: $(OBJ)/src/host/main_native.o $(call objs,src/host/menu.cpp src/host/romset.cpp src/host/stb_image_impl.cpp src/rt/rec_table_none.cpp $(CORE) $(MACHINE) $(SOUND) $(RT) $(NATIVE) $(RML_SRC)) $(SLJIT_OBJ) $(MUSASHI_OBJ) $(Z80_OBJ) $(patsubst %.S,$(OBJ)/%.o,$(CORO_ASM))
+	$(CXX) $(CXXFLAGS) $(SDL_CFLAGS) $(RML_CFLAGS) $(GPU3D_DEF) -I$(OBJ) -DVF_NATIVE -MMD -c $< -o $@
+$(BIN)/vf-native: $(OBJ)/src/host/main_native.o $(call objs,src/host/menu.cpp src/host/romset.cpp src/host/stb_image_impl.cpp src/rt/rec_table_none.cpp $(CORE) $(MACHINE) $(SOUND) $(RT) $(NATIVE) $(RML_SRC)) $(SLJIT_OBJ) $(MUSASHI_OBJ) $(Z80_OBJ) $(patsubst %.S,$(OBJ)/%.o,$(CORO_ASM)) $(GPU3D_OBJ)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS) $(SDL_LIBS) $(FT_LIBS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS) $(SDL_LIBS) $(FT_LIBS) $(GPU3D_LIBS)
 native: $(BIN)/vf-native
 
 $(BIN)/vfcov: $(call objs,tools/vfcov.cpp $(CORE) $(MACHINE) $(SOUND)) $(MUSASHI_OBJ) $(Z80_OBJ)
