@@ -1043,6 +1043,14 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 	// Protect against bad data when attacking a super destroyer
 	if(tex_adr == 0xffffffff || size >= 0x1000000)
 		return;
+	// VF's name entry: the wheel's letters N-Z, the symbols and BACK take their colours from the
+	// block at 94000, END from 94040, which the game fills with FFFF at boot and never sets: MAME
+	// (and we, before) drew them black. Cabinet captures (the user's, 2026-10-13: "Congratulations!"
+	// 26 and 24) show them blue and END red, front and back alike; the palette's pens 0x372 (blue)
+	// and 0x373 (red) are those colours and nothing else uses them. Only these two blocks, only
+	// with FFFF in them, and only the wheel's letter models (380a36-381c2d), which no other scene
+	// draws.
+	const int ne_pen = (poly_adr >= 0x380a36 && poly_adr <= 0x381c2d) ? tex_adr == 0x94000 ? 0x372 : tex_adr == 0x94040 ? 0x373 : 0 : 0;
 
 #if 0
 	int dump;
@@ -1261,6 +1269,7 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 			// flat UI element (radar blips, HUD text) drawn unlit, and mode 01
 			// additionally blinks by rotating the BGR channels on alternate frames.
 			uint16_t tex_data = m_tgp_ram[tex_adr - 0x40000];
+			if (ne_pen && tex_data == 0xffff) tex_data = uint16_t(0xfc00 | ne_pen);   // (see above; still unlit)
 			int color = m_paletteram16[0x1000 | (tex_data & 0x3ff)];
 			int r = (color >> 0x0) & 0x1f;
 			int g = (color >> 0x5) & 0x1f;

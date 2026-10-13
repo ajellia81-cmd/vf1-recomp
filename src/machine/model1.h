@@ -346,7 +346,7 @@ private:
 		int pending_count = 0;
 	};
 	std::vector<sky_art> m_skies;
-	struct screen_art { std::string name; uint32_t hash = 0; std::vector<uint32_t> px; int w = 0, h = 0; };
+	struct screen_art { std::string name; std::vector<uint32_t> hashes; std::vector<uint32_t> px; int w = 0, h = 0; };
 	std::vector<screen_art> m_screens;
 	const screen_art *m_screen_now = nullptr;
 	void draw_screen_sides(bitmap_rgb32 &bitmap);

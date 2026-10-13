@@ -60,8 +60,8 @@ const key_bind SYS_KEYS[] = {
 // Gamepads (a Steam Deck under Steam Input looks like one), by default (the menu remaps them):
 //   d-pad / left stick: move     X guard   A punch   B kick
 //   Y guard+punch (throws)   RB punch+kick   LB guard+kick   RT guard+punch+kick
-//   Start: starts (with --arcade: inserts a coin, then starts)
-//   View tapped: the menu (with --arcade: View held + Start)   View + LB: render scale   View + RB: picture shape
+//   Start: starts (with --arcade: only with a credit, as the cabinet's start button)
+//   View tapped: the menu (with --arcade: a coin; the menu is View held + Start)   View + LB: render scale   View + RB: picture shape
 // The PC build (the default; --arcade for the cabinet's behaviour): no boot screen, always free
 // play with nothing said about it, and Start simply starts.
 bool g_pc_mode = true;
@@ -186,10 +186,9 @@ hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const playe
 	static bool key_start_was[2], key_coin_was[2], pad_coin_was[2];
 	for (int p = 0; p < 2; p++) {
 		pad_state &st = ps[p];
-		auto press_start = [&] {
-			if (!g_pc_mode) st.coin_frames = 6;   // arcade: a coin, then start a moment later
-			st.start_delay = g_pc_mode ? 0 : 12;
-		};
+		// Start is the cabinet's start button: in Arcade mode it starts only with a credit (coins
+		// come from the Coin binding, the 5 and 6 keys, or View tapped on a pad)
+		auto press_start = [&] { st.start_delay = 0; };
 		for (int a = 0; a < C_START; a++)
 			if (key(ctl[p].key[a])) in[1 + p] |= BITS[a];
 		const bool kstart = key(ctl[p].key[C_START]);
@@ -1116,7 +1115,7 @@ int main(int argc, char **argv)
 	auto game_page = [&] {
 		menu_page p{ "Game", "", {} };
 		p.items.push_back({ "Play style",
-			"PC skips the boot screen and is always free play. Arcade has the boot screen, coins and credits, like the real cabinet (its coin settings are kept for it). Changing it restarts the game.",
+			"PC skips the boot screen and is always free play. Arcade has the boot screen, coins and credits, like the real cabinet: Start needs a credit, and Coin (or View tapped on a pad) adds one (its coin settings are kept for it). Changing it restarts the game.",
 			[&] { return std::string(cfg.arcade ? "Arcade" : "PC"); },
 			[&](int) {
 				keep_arcade_coins();

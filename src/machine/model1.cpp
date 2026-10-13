@@ -829,7 +829,7 @@ void model1::screen_update(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 	if (m_ext && !m_wide_frame && !m_screens.empty()) {
 		const uint32_t h = backdrop_hash();
 		for (const auto &a : m_screens)
-			if (a.hash == h) m_screen_now = &a;
+			if (std::find(a.hashes.begin(), a.hashes.end(), h) != a.hashes.end()) m_screen_now = &a;
 	}
 	draw_tiles(bitmap, cliprect, 6, segas24_tile::DRAW_OPAQUE);
 	draw_tiles(bitmap, cliprect, 4, segas24_tile::DRAW_OPAQUE);

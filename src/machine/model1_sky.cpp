@@ -16,12 +16,15 @@
 namespace {
 
 // The records' places in the program ROM (all in the bank at 1100000), by the export's names.
-struct sky_record { const char *name; uint32_t rom; };
+// `top`: a record of one row the game streams over the panorama's top row (0: none). Wolf's stage
+// has one (in ROMX at 2e7aa4): the dithered blend from the sky's colour into the clouds. Drawn from
+// the panorama's own top row instead, the clouds started at a hard line above 1x.
+struct sky_record { const char *name; uint32_t rom; uint32_t top = 0; };
 const sky_record SKY_RECORDS[] = {
 	{ "beach_clouds", 0x110002c }, { "canyon_mesas", 0x11117a8 }, { "night_city", 0x1134370 },
 	{ "lake_mountain", 0x114c878 }, { "desert_dunes", 0x11655b4 }, { "karst_mountains", 0x116af60 },
 	{ "dusk_clouds", 0x118a0e8 },
-	{ "sunset_clouds", 0x11190b8 },   // Wolf's stage
+	{ "sunset_clouds", 0x11190b8, 0x2e7aa4 },   // Wolf's stage
 };
 constexpr uint32_t SKY_BANK = 0x1100000;
 constexpr int SKY_MAP = 2, SKY_ROW0 = 6;    // streamed into tile map 2 from row 6 (704300)
@@ -70,6 +73,12 @@ void model1::init_skies()
 				for (int x = 0; x < 32; x++)
 					a.entries[size_t(y) * 256 + b * 32 + x] = rd16(blk + 12 + 2 * (y * stride + x));
 		}
+		if (rec.top)                              // the row the game writes over the top one
+			for (int b = 0; b < 8; b++) {
+				uint32_t blk = (rec.top & ~0xfffffu) + (rd32(rec.top + 8 + 4 * b) & 0xfffff);
+				if (rd32(blk + 4) < 1) continue;
+				for (int x = 0; x < 32; x++) a.entries[size_t(b) * 32 + x] = rd16(blk + 12 + 2 * x);
+			}
 		// a panorama may repeat (the desert's two halves are the same): placed within one repeat
 		a.period = 256;
 		while (a.period > 8) {
@@ -498,26 +507,30 @@ namespace {
 // Each picture's backdrop map (layers 4 and 5), by backdrop_hash(): the same whatever the palette
 // does, so the sides fade with the picture.
 struct screen_record { const char *name; uint32_t hash; };
-const screen_record SCREEN_RECORDS[] = { { "title", 0x6e31a62b }, { "select", 0xfa5cc994 } };
+// The player select has three layouts: player 1 alone (portrait on the left), player 2 alone
+// (portrait on the right: player 2 starting from the demo) and both (VS: a challenger joining).
+const screen_record SCREEN_RECORDS[] = { { "title", 0x6e31a62b }, { "select", 0xfa5cc994 },
+										 { "select", 0x282467f8 }, { "select", 0xa7c660d4 } };
 } // namespace
 
 std::vector<std::string> model1::screen_names()
 {
 	std::vector<std::string> n;
-	for (const auto &r : SCREEN_RECORDS) n.push_back(r.name);
+	for (const auto &r : SCREEN_RECORDS)
+		if (std::find(n.begin(), n.end(), r.name) == n.end()) n.push_back(r.name);
 	return n;
 }
 
 bool model1::load_screen(const std::string &name, std::vector<uint32_t> xrgb, int w, int h)
 {
+	std::vector<uint32_t> hashes;                  // (the select: one per layout, the same picture)
 	for (const auto &r : SCREEN_RECORDS)
-		if (name == r.name && w > 0 && h > 0) {
-			std::erase_if(m_screens, [&](const screen_art &a) { return a.name == name; });
-			m_screens.push_back({ name, r.hash, std::move(xrgb), w, h });
-			m_screen_now = nullptr;
-			return true;
-		}
-	return false;
+		if (name == r.name) hashes.push_back(r.hash);
+	if (hashes.empty() || w <= 0 || h <= 0) return false;
+	std::erase_if(m_screens, [&](const screen_art &a) { return a.name == name; });
+	m_screens.push_back({ name, std::move(hashes), std::move(xrgb), w, h });
+	m_screen_now = nullptr;
+	return true;
 }
 
 // The sides of a 4:3 screen in widescreen, from its picture (only its sides are used: the shipped

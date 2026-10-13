@@ -9,7 +9,8 @@
 //                 VF_MUSIC / VF_EFFECTS levels), and NAME.txt: each picture's moment in game frames
 //                 (VF_SMOOTH=1: smooth motion, as the game above 1x; VF_OUT=WxH scaled for an edit,
 //                 VF_OUT_FLAGS its ffmpeg scaler, lanczos by default; VF_LOG=file: a line a frame of
-//                 health, rounds won and round flags, for finding marks: tools/montage/vflog.py)
+//                 health, rounds won and round flags, for finding marks: tools/montage/vflog.py;
+//                 VF_INLOG=file: each frame's inputs, for tools/mame_play.sh)
 //   PORT 0: coin1 01 coin2 02 test 04 service 08 start1 10 start2 20; PORT 1/2: players
 #include "../src/host/regions.h"
 #include "../src/host/png.h"
@@ -158,7 +159,11 @@ int main(int argc, char **argv)
 		}
 		printf("%s: %ld pictures (%.2f s)\n", rec_name.c_str(), rec_k, rec_k / 60.0);
 	};
+	// VF_INLOG=file: the inputs each frame ran with (frame, then the three ports' pressed bits), for
+	// playing the same inputs in MAME (tools/mame_play.sh)
+	static FILE *inlog = getenv("VF_INLOG") ? fopen(getenv("VF_INLOG"), "w") : nullptr;
 	auto step = [&] {
+		if (inlog) fprintf(inlog, "%d %02x %02x %02x\n", fno + 1, unsigned(uint8_t(~m.m_inputs[0])), unsigned(uint8_t(~m.m_inputs[1])), unsigned(uint8_t(~m.m_inputs[2])));
 		m.run_frame();
 		fno++;
 		// as the game: with smooth motion a frame is only drawn when shown, so a held scene change
