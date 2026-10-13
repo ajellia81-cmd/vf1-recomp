@@ -152,6 +152,8 @@ Made with the help of AI coding tools. Every build is checked against the arcade
 side with an interpreter of the original code, and both are compared frame by frame with MAME's pictures, RAM and
 sound.
 
+The whole story, with how the AI-assisted work was organised and checked: [docs/HOW-IT-WAS-MADE.md](docs/HOW-IT-WAS-MADE.md).
+
 ## Credits
 
 Built on MAME's work on the Model 1: the V60 core and disassembler (Farfetch'd, R. Belmont), the TGP, the
