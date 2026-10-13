@@ -21,7 +21,7 @@ recompiled to native code, with render scales up to 6x, widescreen and smooth mo
 </p>
 
 <p align="center">
-  <a href="https://vf1-recomp.pages.dev/img/montage.jpg"><img src="https://vf1-recomp.pages.dev/img/montage.jpg" alt="Virtua Fighter Recomp at 3x: fights on five stages and the widescreen player select" width="800"></a>
+  <a href="https://vf1-recomp.pages.dev/img/montage.jpg?v=2"><img src="https://vf1-recomp.pages.dev/img/montage.jpg?v=2" alt="Virtua Fighter Recomp at 3x: fights on five stages and the widescreen player select" width="800"></a>
 </p>
 
 > [!IMPORTANT]
