@@ -974,7 +974,7 @@ int main(int argc, char **argv)
 	auto auto_gpu = [](bool was, double c, double g) {
 		return was ? !(g > 1.5 * c && g > 8.0) : (g <= 1.3 * c || g < 6.0);
 	};
-	auto apply_3d = [&] { m.set_gpu3d_on(g3 && !a3.broken && a3.gpu); };
+	auto apply_3d = [&] { m.set_gpu3d_on(g3 && !a3.broken && a3.gpu); m.m_gpu3d_chosen = cfg.renderer3d == 1; };
 	auto renderer_name = [&]() -> std::string {
 #if VF_GPU3D_METAL
 		if (!g3 || a3.broken) return "CPU (no GPU here)";
@@ -1000,13 +1000,16 @@ int main(int argc, char **argv)
 			a3.tested = true;
 			double c = 0, g = 0;
 			long long d = -1;
-			if (!m.bench3d(1, c, g, &d) || d != 0) {
+			m.m_gpu3d_chosen = cfg.renderer3d == 1;
+			const long long px = (long long)m.frame_w() * m.frame_h(), ok = m.gpu_rounding_ok(px);
+			if (!m.bench3d(1, c, g, &d) || d < 0 || d > ok) {
 				a3.broken = true; a3.gpu = false; apply_3d();
-				if (d > 0) fprintf(stderr, "the 3D on the GPU: its test picture isn't the CPU's (%lld pixels differ): the CPU for this run\n", d);
+				if (d > 0) fprintf(stderr, "the 3D on the GPU: its test picture isn't the CPU's (%lld of %lld pixels differ, over the %lld kept): the CPU for this run\n", d, px, ok);
 				else fprintf(stderr, "the 3D on the GPU: its test picture failed: the CPU for this run\n");
 				return;
 			}
-			fprintf(stderr, "the 3D on the GPU: its test picture is the CPU's, pixel for pixel\n");
+			if (d > 0) fprintf(stderr, "the 3D on the GPU: its test picture: %lld of %lld pixels differ by rounding (up to %lld kept): keeping the GPU\n", d, px, ok);
+			else fprintf(stderr, "the 3D on the GPU: its test picture is the CPU's, pixel for pixel\n");
 		}
 #endif
 		if (cfg.renderer3d != 2) {

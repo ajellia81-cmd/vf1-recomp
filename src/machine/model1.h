@@ -2,6 +2,8 @@
 // C functions (MAME 0.210's simulation) and the polygon rasterizer (MAME's model1_v.cpp).
 // Ported from MAME's Model 1 driver, BSD-3-Clause, copyright-holders: Olivier Galibert.
 #pragma once
+#include <algorithm>
+#include <cstdlib>
 #include "parallel.h"
 #include <cmath>
 #include <unordered_map>
@@ -929,4 +931,14 @@ public:
 	// every 60 with a fight's polygons): a difference is a failure (m_g3.failed: the CPU's then).
 	// (last: the members before it where they were)
 	int m_gpu3d_verify = 0;
+	// How many differing pixels are rounding, not a broken GPU (some graphics cards' drivers,
+	// NVIDIA's on Direct3D 12, put a handful of pixels a hair off): the GPU kept up to
+	// GPU_ROUNDING_PX, or 0.01% of the picture if more; when the player chose the GPU (not Auto,
+	// m_gpu3d_chosen), up to 1%: only a picture mostly wrong puts the 3D on the CPU.
+	static constexpr long long GPU_ROUNDING_PX = 64;
+	static constexpr double GPU_ROUNDING_SHARE = 0.0001, GPU_ROUNDING_CHOSEN = 0.01;
+	bool m_gpu3d_chosen = false;
+	long long gpu_rounding_ok(long long px) const { return std::max(GPU_ROUNDING_PX, (long long)(px * (m_gpu3d_chosen ? GPU_ROUNDING_CHOSEN : GPU_ROUNDING_SHARE))); }
+	// tests: VF_GPU3D_TEST_DIFF=n, a check's picture counted n pixels more apart (-1: all of them)
+	static long long gpu_test_diff(long long d, long long px) { const char *t = getenv("VF_GPU3D_TEST_DIFF"); if (!t) return d; const long long k = atoll(t); return k < 0 ? px : std::min(px, d + k); }
 };

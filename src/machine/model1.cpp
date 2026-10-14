@@ -434,6 +434,8 @@ void model1::resize_frame()
 	m_bitmap.allocate((SCREEN_W + 2 * m_ext) * m_scale, SCREEN_H * m_scale);
 	m_bitmap_whole = true;                    // (not KEY yet, for the GPU's parts)
 	m_tile_tmp.allocate(SCREEN_W + 2 * m_ext, SCREEN_H);
+	m_l4_frame = ~0ull;                       // (made again empty: layer 4 drawn into it again, a
+	                                          // stopped game's too, or a 4:3 screen's painted sides go black)
 	m_tiles.m_ox = 0;
 	v->scale = float(m_scale);
 	v->ext = float(m_ext);

@@ -2256,6 +2256,8 @@ void model1::gpu3d_end(bitmap_rgb32 &bitmap)
 			const uint32_t *a = m_check_cpu.data(), *g = bitmap.data();
 			size_t diff = 0, first = n;
 			for (size_t i = 0; i < n; i++) if (a[i] != g[i]) { if (!diff) first = i; diff++; }
+			if (verify) diff = size_t(gpu_test_diff((long long)diff, (long long)n));
+			if (first == n) first = 0;
 			m_g3.checked++;
 			if (diff) {
 				m_g3.differ++;
@@ -2263,7 +2265,10 @@ void model1::gpu3d_end(bitmap_rgb32 &bitmap)
 						(unsigned long long)m_frame, bitmap.width(), bitmap.height(), diff, first % bitmap.width(), first / bitmap.width(), a[first], g[first]);
 			}
 			if (verify) {
-				if (diff) {   // (not the CPU's: the CPU's picture shown, and the CPU's from now on)
+				if (diff && (long long)diff <= gpu_rounding_ok((long long)n)) {   // (rounding: the GPU's kept)
+					fprintf(stderr, "the 3D on the GPU: %zu of %d x %d pixels differ by rounding (up to %lld kept): keeping the GPU\n", diff, bitmap.width(), bitmap.height(), gpu_rounding_ok((long long)n));
+					if (--m_gpu3d_verify == 0) fprintf(stderr, "the 3D on the GPU: the game's pictures checked against the CPU's\n");
+				} else if (diff) {   // (not the CPU's: the CPU's picture shown, and the CPU's from now on)
 					memcpy(bitmap.data(), m_check_cpu.data(), n * 4);
 					m_g3.failed++;
 					m_gpu3d_verify = 0;
@@ -2360,7 +2365,7 @@ bool model1::bench3d(int reps, double &cpu_ms, double &gpu_ms, long long *differ
 		ok = run_gpu() >= 0;
 		long long d = 0;
 		for (size_t i = 0; i < cpu.size(); i++) d += cpu[i] != scratch.data()[i];
-		*differ = d;
+		*differ = gpu_test_diff(d, (long long)cpu.size());
 	}
 	view->x1 = sx1; view->x2 = sx2; view->y1 = sy1; view->y2 = sy2;
 	s_mark_y1 = mk1; s_mark_y2 = mk2;

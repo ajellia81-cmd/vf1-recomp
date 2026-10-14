@@ -365,15 +365,18 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
       </div></span>
     <span class="info"><button class="lnk" aria-expanded="false">Changelog</button>
       <div class="pop" role="dialog" aria-label="Changelog">
-        <p><b>v1.1.11</b> &middot; Oct 13 2026</p>
+        <p><b>v1.1.12</b> &middot; Oct 14 2026</p>
         <ul>
+          <li>GPU renderer: no longer switches off over a few pixels of rounding difference on some graphics cards (NVIDIA). The game still checks the GPU's picture against the CPU's and uses the CPU if the GPU's is really wrong; if you chose GPU (not Auto), only a broken picture or an error switches it off.</li>
+        </ul>
+        <details><summary>v1.1.11</summary><ul>
           <li>GPU renderer: the 3D can now be drawn by the graphics card on Mac, Windows and Steam Deck, with exactly the same picture. Display &gt; 3D renderer: Auto (the default) uses the GPU unless it's slower on your machine; the game checks the GPU's picture when it starts and uses the CPU if anything is off.</li>
           <li>Sarah's stage: the light from below the fighters pulses with the floor, as on the cabinet.</li>
           <li>Smaller menus: tighter rows and text, so more fits on small screens.</li>
           <li>Steam Deck: simpler install steps in the README (the shortcut points at the game itself).</li>
           <li>Portable mode: put a file named <code>portable.txt</code> beside the game and it keeps everything (settings, saves, screenshots, your ROM) in its own folder.</li>
           <li>Your own ROM folder: <code>--roms &lt;folder&gt;</code>, <code>VF_ROMS</code> or <code>roms_folder</code> in <code>settings.ini</code> tells the game where <code>vf.zip</code> is (e.g. Batocera's <code>/userdata/roms/ports/vf</code>), so an update or reinstall can't touch it.</li>
-        </ul>
+        </ul></details>
         <details><summary>v1.1.10</summary><ul>
           <li>Arcade mode: Start only starts a game when there's a credit, like the cabinet's start button. Credits come from the Coin button.</li>
           <li>Widescreen: the player select gets its painted sides when player 2 starts from the demo or a challenger joins, not just for player 1.</li>
