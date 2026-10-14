@@ -912,11 +912,20 @@ int main(int argc, char **argv)
 	}
 #elif VF_GPU3D_SDL
 	{
-		if (cfg.renderer3d != 0) {
+		// (2026-10-15, as vf2-recomp's for its #6: an old card's driver (an HD 7800 with CRT Emudriver)
+		// closed the game inside the GPU's start, with no message, at every start. A marker is left
+		// while it starts: there next time, it crashed then, so the CPU's 3D, said so. Deleting
+		// gpu-start.crashed tries again.)
+		const std::string marker = dir + "/gpu-start.crashed";
+		const bool crashed = cfg.renderer3d != 0 && SDL_GetPathInfo(marker.c_str(), nullptr);
+		if (crashed) fprintf(stderr, "the 3D on the CPU: the last start closed while starting the GPU's (%s)\n", marker.c_str());
+		if (cfg.renderer3d != 0 && !crashed) {
 			const uint64_t t0 = SDL_GetTicksNS();
+			if (SDL_IOStream *io = SDL_IOFromFile(marker.c_str(), "w")) SDL_CloseIO(io);
 			g3 = gpu3d_create_sdlgpu();
+			SDL_RemovePath(marker.c_str());
 			fprintf(stderr, "the 3D on the GPU: %s (%.0f ms to start)\n", g3 ? g3->name() : "none here (the CPU's 3D)", (SDL_GetTicksNS() - t0) / 1e6);
-		} else {
+		} else if (!crashed) {
 			g3_next_start = true;
 			fprintf(stderr, "the 3D on the CPU (the setting): the GPU's from the next start if chosen\n");
 		}

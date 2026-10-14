@@ -365,10 +365,14 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
       </div></span>
     <span class="info"><button class="lnk" aria-expanded="false">Changelog</button>
       <div class="pop" role="dialog" aria-label="Changelog">
-        <p><b>v1.1.12</b> &middot; Oct 14 2026</p>
+        <p><b>v1.1.13</b> &middot; Oct 15 2026</p>
         <ul>
-          <li>GPU renderer: no longer switches off over a few pixels of rounding difference on some graphics cards (NVIDIA). The game still checks the GPU's picture against the CPU's and uses the CPU if the GPU's is really wrong; if you chose GPU (not Auto), only a broken picture or an error switches it off.</li>
+          <li>A graphics driver that crashes while the GPU renderer starts (seen on an old Radeon with CRT Emudriver) no longer stops the game: the next start uses the CPU's 3D instead. Delete gpu-start.crashed in the game's data folder to try the GPU again.</li>
         </ul>
+        <details><summary>v1.1.12</summary><ul>
+          <li>GPU renderer: no longer switches off over a few pixels of rounding difference on some graphics cards (NVIDIA). The game still checks the GPU's picture against the CPU's and uses the CPU if the GPU's is really wrong; if you chose GPU (not Auto), only a broken picture or an error switches it off.</li>
+          <li>Widescreen select and title: changing Render scale or Antialiasing from the pause menu no longer blacks out the painted sides (and the select portrait's sky).</li>
+        </ul></details>
         <details><summary>v1.1.11</summary><ul>
           <li>GPU renderer: the 3D can now be drawn by the graphics card on Mac, Windows and Steam Deck, with exactly the same picture. Display &gt; 3D renderer: Auto (the default) uses the GPU unless it's slower on your machine; the game checks the GPU's picture when it starts and uses the CPU if anything is off.</li>
           <li>Sarah's stage: the light from below the fighters pulses with the floor, as on the cabinet.</li>
