@@ -569,6 +569,12 @@ void model1::draw_screen_sides(bitmap_rgb32 &bitmap)
 			if (std::fabs(r - 1.0f) < 0.08f) r = 1.0f;           // not fading: as it is
 			gain[side][c] = std::clamp(r, 0.0f, 2.0f);
 		}
+		// A fade takes the colours down (or up) together. Far apart, the backdrop isn't the picture's
+		// yet: the select's first frame from the title has it all one blue, its palette not set, under
+		// the game's black. Black sides, as the picture.
+		const float *g = gain[side];
+		if (std::max({ g[0], g[1], g[2] }) - std::min({ g[0], g[1], g[2] }) > 0.5f)
+			gain[side][0] = gain[side][1] = gain[side][2] = 0.0f;
 	}
 	const int s = m_scale, left = m_ext * s, right = (m_ext + SCREEN_W) * s, out_w = bitmap.width();
 	if (&bitmap == &m_sides) {                     // (the GPU's copy: painted again only when it changes)
