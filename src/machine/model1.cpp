@@ -1107,6 +1107,16 @@ void model1::screen_update(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 				m_tiles.tile_r(0x5002), m_tiles.tile_r(0x5006), m_tiles.tile_r(0x5003), m_tiles.tile_r(0x5007),
 				m_tiles.tile_r(0x5004), m_tiles.tile_r(0x5006));
 	m_fight_cam = fight_camera();
+	// A screen with painted sides, known by its backdrop: 4:3 from its first frame. (Between scenes the
+	// camera reads none, and the last one's kept: a fight's, for a few frames into the select.)
+	const screen_art *known = nullptr;
+	if (m_ext && !m_screens.empty()) {
+		const uint32_t h = backdrop_hash();
+		for (const auto &a : m_screens)
+			if (std::find(a.hashes.begin(), a.hashes.end(), h) != a.hashes.end()) known = &a;
+	}
+	const bool no_cam = !(m_ram_b[0x17f0] | m_ram_b[0x17f1] | m_ram_b[0x17f2] | m_ram_b[0x17f3]);
+	if (known && no_cam) m_fight_cam = false;
 	if (m_ext) {
 		bool wide = m_fight_cam;
 		static const bool log_wide = getenv("VF_LOG_WIDE") != nullptr;
@@ -1124,12 +1134,7 @@ void model1::screen_update(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 					m_tiles.tile_r(0x5002), m_tiles.tile_r(0x5006), m_ram_b[0x17f3], m_ram_b[0x17f2], m_ram_b[0x17f1], m_ram_b[0x17f0]);
 		last = h;
 	}
-	m_screen_now = nullptr;
-	if (m_ext && !m_wide_frame && !m_screens.empty()) {
-		const uint32_t h = backdrop_hash();
-		for (const auto &a : m_screens)
-			if (std::find(a.hashes.begin(), a.hashes.end(), h) != a.hashes.end()) m_screen_now = &a;
-	}
+	m_screen_now = m_wide_frame ? nullptr : known;
 	draw_tiles(bitmap, cliprect, 6, segas24_tile::DRAW_OPAQUE);
 	draw_tiles(bitmap, cliprect, 4, segas24_tile::DRAW_OPAQUE);
 	if (m_screen_now && m_parts) {
@@ -1272,7 +1277,14 @@ void model1::clear_moire_marks(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 // is up (title, player select, ranking), whatever its palette is doing.
 uint32_t model1::backdrop_hash() const
 {
+	// (a secret character's select icon in Akira's: its cells counted as VF's own, so the select is
+	// known by the same hash and keeps its widescreen sides)
+	auto entry = [&](uint32_t o) -> uint16_t {
+		if (m_icon.active && o >= m_icon.at && o < m_icon.at + 8 * 64 && (o - m_icon.at) % 64 < 7)
+			return m_icon.keep_map[((o - m_icon.at) / 64) * 7 + (o - m_icon.at) % 64];
+		return m_tiles.tile_r(o);
+	};
 	uint32_t h = 2166136261u;
-	for (int i = 0; i < 0x1000; i++) h = (h ^ m_tiles.tile_r(0x2000 + i)) * 16777619u;
+	for (int i = 0; i < 0x1000; i++) h = (h ^ entry(0x2000 + i)) * 16777619u;
 	return h;
 }
