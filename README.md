@@ -82,8 +82,8 @@ ROM, by the game's own renderer:
 
 | Character | Select screen | Health bar | Notes |
 | --- | --- | --- | --- |
-| Siba (Majido) | Own portrait, icon and profile; named MAJIDO (P1) or SHIIBA (P2) | MAJIDO | The most complete of them |
-| Jeff | Own portrait and profile, a made icon; named JEFFERY | JEFF | An early Jeffry |
+| Siba (Majido) | Own portrait, icon and profile; named MAJIDO (P1) or SHIIBA (P2) | MAJIDO | The most complete of them; his pursuit attack can teleport him across the stage |
+| Jeff | Own portrait and profile, a made icon; named JEFFERY | JEFF | A handful of Jacky's moves; his hat and shades can be knocked off |
 | Takeru | Akira's name and profile, a made icon | AKIRA | The early Akira, in Akira's headband |
 | Rekka | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | Rekka and Score share a head |
 | Score | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | Looks like Rekka |
@@ -91,8 +91,28 @@ ROM, by the game's own renderer:
 | Dural | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | |
 
 They take Akira's place, so arcade mode's CPU Akira is them too, and Akira can't be picked while one is on. The rest
-of Cheats: infinite energy (player 1, 2 or both), one-hit KO, no time limit, and a tiny or huge ring. They come from
-mountainmanjed's MAME cheats, documented on [The Cutting Room Floor](https://tcrf.net/Virtua_Fighter_(Arcade)).
+of Cheats: infinite energy (player 1, 2 or both), one-hit KO, no time limit, and a tiny or huge ring.
+
+### Who they were
+
+From [The Cutting Room Floor](https://tcrf.net/Virtua_Fighter_(Arcade)), whose research (and mountainmanjed's MAME
+cheats) these come from:
+
+- **Siba (Majido Ab Dul)**: seen in pre-release screenshots and on the international cabinet's artwork, as "Shiiba"
+  (on some cabinets mislabelled Akira). Renamed Majido before he was cut, late: he is the only one with his own select
+  icon and voice clips, recorded like the final cast's. His moves are borrowed from Sarah and Lau. He came back as a
+  hidden character, Siba, in Fighters Megamix.
+- **Jeff (Jeffery Buckman)**: a soldier in camo, a cap and shades. His name is likely a tribute to VF1 staff member
+  Jeffrey Buchanan, and "Jeffery" later went to Jeffry; finish the game with him and the rankings call him WILLIE,
+  Jeffry's early name. He looks remarkably like Tekken 2's Prototype Jack, from many of the same designers.
+- **Takeru (Takeru Ryushoji)**: listed just before Akira in the game's character table and fighting under Akira's name,
+  most likely Akira's early design, but with his own unused bio and nameplate, and TAKERU on the rankings when you
+  finish with him. (Akira himself was once Akira Ryuzaki.)
+- **The Koskol brothers, Rekka, Score and Aeon**: listed just after Akira, with Dural's name and moves. Early design
+  documents name them as the game's three final bosses, perhaps meant to be fought a round each; with the same moves
+  and IDs, they're in effect one character with three outfits.
+- **Dural**: the game's real final boss, never selectable. An early, unused select screen in the code has a portrait
+  for Dural (and one for a Koskol brother), so she may once have been meant to be playable.
 
 ## Play
 
