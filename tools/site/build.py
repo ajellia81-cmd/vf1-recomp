@@ -22,7 +22,7 @@ or VF_REF_URL; without it, no Function is written.
 
   tools/site/build.py [--url https://vf1-recomp.pages.dev] [--version (default: the latest tag)]
 """
-import argparse, datetime, json, os, shutil, subprocess, sys
+import argparse, re, datetime, json, os, shutil, subprocess, sys
 
 REFHIT = '''// The page pings /_refhit on its OWN origin; this passes the reading to the collector
 // server-side. Nothing in the markup points at another host, so the sites stay unlinkable.
@@ -116,6 +116,14 @@ def main():
     m = os.path.join(ROOT, 'build', 'readme', 'vf1_montage.jpg')
     if os.path.exists(m): shutil.copyfile(m, os.path.join(img, 'montage.jpg'))
     else: print('no build/readme/vf1_montage.jpg: no README montage on the site')
+    # the changelog's lineup (the cast's and the secret characters' select portraits: game pictures, kept
+    # out of git like the montage): build/readme/secret-characters.png, made small for the popup. Without it
+    # the page leaves the picture out.
+    lineup = os.path.join(ROOT, 'build', 'readme', 'secret-characters.png')
+    if os.path.exists(lineup):
+        im = Image.open(lineup).convert('RGB')
+        im.resize((720, round(720 * im.height / im.width)), Image.LANCZOS).save(os.path.join(img, 'lineup.jpg'), quality=86, optimize=True)
+    else: print('no build/readme/secret-characters.png: no lineup in the changelog')
     icon = Image.open(os.path.join(ROOT, 'assets', 'icon', 'icon.png')).convert('RGBA')
     subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'site', 'marquee.py'), os.path.join(img, 'marquee.png')], check=True)
     icon.resize((64, 64), Image.LANCZOS).save(os.path.join(img, 'icon-64.png'), optimize=True)
@@ -135,6 +143,8 @@ def main():
     }
     for k, v in subs.items():
         page = page.replace(k, v)
+    if not os.path.exists(lineup):   # (no picture: its figure left out)
+        page = re.sub(r'\s*<figure class="lineup">.*?</figure>', '', page, flags=re.S)
     shutil.rmtree(os.path.join(OUT, 'functions'), ignore_errors=True)   # (an old build's, inside the site)
     os.makedirs(os.path.join(ROOT, 'functions'), exist_ok=True)
     ref_file = os.path.join(ROOT, '.refhit-url')

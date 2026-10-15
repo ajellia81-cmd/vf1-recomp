@@ -126,6 +126,9 @@ main{--s:1; position:relative; z-index:1; width:100%; min-width:0; margin-block:
 .pop details summary::after{content:"+"; float:right; color:var(--muted)}
 .pop details[open] summary::after{content:"\2212"}
 .pop details ul{margin:0; padding-top:.4rem; overflow:hidden}
+.pop figure.lineup{margin:.5rem 0 .2rem}
+.pop figure.lineup img{display:block; width:100%; height:auto; border-radius:6px}
+.pop figure.lineup figcaption{font-size:.74rem; color:var(--muted); margin-top:.3rem}
 .pop details.closing summary::after{content:"+"}
 .pop p+ul{margin-top:.3rem}
 .pop b{color:var(--ink)}
@@ -367,10 +370,20 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
       </div></span>
     <span class="info"><button class="lnk" aria-expanded="false">Changelog</button>
       <div class="pop" role="dialog" aria-label="Changelog">
-        <p><b>v1.1.13</b> &middot; Oct 15 2026</p>
+        <p><b>v1.2.0</b> &middot; Oct 15 2026</p>
         <ul>
-          <li>A graphics driver that crashes while the GPU renderer starts (seen on an old Radeon with CRT Emudriver) no longer stops the game: the next start uses the CPU's 3D instead. Delete gpu-start.crashed in the game's data folder to try the GPU again.</li>
+          <li><b>Secret characters:</b> Menu &gt; Cheats &gt; Secret character puts a fighter cut from the arcade ROM in Akira's spot: Siba, Jeff, Takeru (the early Akira), the Koskol brothers Rekka, Score and Aeon, or Dural. Unfinished in the original (borrowed moves, no throws).</li>
         </ul>
+        <figure class="lineup"><img src="img/lineup.jpg" alt="The cast's select portraits, and the secret characters' below" loading="lazy" width="720" height="218"><figcaption>Their missing portraits and icons, rendered from their own 3D models in the ROM and matched to the cast's.</figcaption></figure>
+        <ul>
+          <li><b>Cheats:</b> infinite energy (P1, P2 or both), one-hit KO, no time limit, tiny or huge rings.</li>
+          <li><b>Windows:</b> the GPU renderer now works on AMD and older NVIDIA cards (Direct3D 12), with a Vulkan fallback.</li>
+          <li><b>Menu button:</b> L3 + R3 or the touchpad click on any pad, remappable in Controls.</li>
+          <li>The FPS counter hides while the menu is open; log.txt shows the version first.</li>
+        </ul>
+        <details><summary>v1.1.13</summary><ul>
+          <li>A graphics driver that crashes while the GPU renderer starts (seen on an old Radeon with CRT Emudriver) no longer stops the game: the next start uses the CPU's 3D instead. Delete gpu-start.crashed in the game's data folder to try the GPU again.</li>
+        </ul></details>
         <details><summary>v1.1.12</summary><ul>
           <li>GPU renderer: no longer switches off over a few pixels of rounding difference on some graphics cards (NVIDIA). The game still checks the GPU's picture against the CPU's and uses the CPU if the GPU's is really wrong; if you chose GPU (not Auto), only a broken picture or an error switches it off.</li>
           <li>Widescreen select and title: changing Render scale or Antialiasing from the pause menu no longer blacks out the painted sides (and the select portrait's sky).</li>
