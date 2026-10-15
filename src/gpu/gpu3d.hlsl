@@ -10,8 +10,10 @@
 // The picture isn't on the GPU (a discrete card's memory isn't the CPU's): the pixels pass writes
 // each pixel's result (res) and what it is (kind, a byte a pixel: 0 untouched, 1 a colour, 2 a
 // shadow over the picture beneath, res its half colour), and the CPU puts them into the picture.
+// Or, on the host's renderer's own device, the target pass writes the 3D straight into one of its
+// textures (gpu3d::draw_target), keyed for the GPU's putting the picture together.
 //
-// Built once per kernel (-D K_CLEAR, K_ROWS, K_SOLID, K_SHADOW, K_PIXELS) by tools/gpu/shaders.sh
+// Built once per kernel (-D K_CLEAR, K_ROWS, K_SOLID, K_SHADOW, K_PIXELS, K_TARGET) by tools/gpu/shaders.sh
 // into src/gpu/gpu3d_shaders.h; resources in SDL_GPU's layout for compute (read-only storage
 // buffers t0.. space 0, read-write u0.. space 1, uniforms b0 space 2).
 //
@@ -246,5 +248,41 @@ void main(uint3 g : SV_DispatchThreadID)
 		kw |= kd << (8u * i);
 	}
 	ST(kind, g.y * words + g.x, kw);
+}
+#endif
+
+// ---- the pixels straight into a texture of the host's renderer, on its own device ----
+// (gpu3d::draw_target: nothing comes back to the CPU.) The whole picture, keyed for gpu_compose's
+// blend (out = src * (1 - a) + beneath * a): a colour opaque (alpha 0), nothing clear (alpha 1). A
+// shadow over the 2D beneath is half of it plus the shadow's half colour, the CPU's
+// ((beneath >> 1) & 0x7f7f7f) + h: alpha 128/255 and the colour h * 255 / 127, within a level of
+// it in the blend's rounding.
+#ifdef K_TARGET
+ByteAddressBuffer polys : register(t0, space0);
+ByteAddressBuffer owner : register(t1, space0);
+ByteAddressBuffer shade : register(t2, space0);
+[[vk::image_format("rgba8")]] RWTexture2D<unorm float4> target : register(u0, space1);
+cbuffer k : register(b0, space2) { uint k_W; uint k_H; uint k_y0; uint k_y1; };
+float3 rgb(uint c) { return float3((c >> 16) & 255u, (c >> 8) & 255u, c & 255u) / 255.0f; }
+[numthreads(8, 8, 1)]
+void main(uint3 g : SV_DispatchThreadID)
+{
+	if (g.x >= k_W || g.y >= k_H) return;
+	float4 o = float4(0.0f, 0.0f, 0.0f, 1.0f);
+	if (g.y >= k_y0 && g.y <= k_y1) {   // (only the region's owners and shadows are this picture's)
+		const uint at = g.y * k_W + g.x;
+		const uint ow = LD(owner, at), s = LD(shade, at);
+		if (s == 0xffffffffu) {
+			if (ow) o = float4(rgb(polys.Load<poly>((ow - 1u) * sizeof(poly)).colour), 0.0f);
+		} else {
+			const uint h = (polys.Load<poly>(s * sizeof(poly)).colour >> 1) & 0x7f7f7fu;
+			if (ow) {
+				const uint b = polys.Load<poly>((ow - 1u) * sizeof(poly)).colour;
+				o = float4(rgb(((b >> 1) & 0x7f7f7fu) + h), 0.0f);
+			} else
+				o = float4(min(rgb(h) * (255.0f / 127.0f), 1.0f), 128.0f / 255.0f);
+		}
+	}
+	target[g.xy] = o;
 }
 #endif

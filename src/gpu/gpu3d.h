@@ -56,6 +56,20 @@ public:
 	virtual bool draw(const gpu3d_poly *polys, size_t count, const gpu3d_span *spans, size_t nspans, size_t rowspans,
 		uint32_t *px, size_t bytes, int w, int h, int y0, int y1, double *gpu_ms = nullptr) = 0;
 	int test_repeat = 1;   // tests: each picture's passes run n times (a slow GPU)
+
+	// Into a texture of the host's renderer instead (SDL_GPU on the renderer's own device): nothing
+	// comes back to the CPU, and nothing waits for the GPU (the renderer's drawing, on the same
+	// device after it, takes it in order). `count` targets the picture's size (RGBA8: the host
+	// wraps each, target_handle, as an SDL_Texture); false: not here.
+	virtual bool make_targets(int w, int h, int count) { (void)w; (void)h; (void)count; return false; }
+	virtual void *target_handle(int i) const { (void)i; return nullptr; }
+	virtual uint64_t targets_made() const { return 0; }   // (a new number when made again)
+	// The polygons into target `t`, all of it: keyed for gpu_compose's blend (alpha 0: a colour,
+	// 1: nothing; a shadow over the 2D beneath half-transparent). False: not drawn (the caller draws
+	// the picture the usual way).
+	virtual bool draw_target(const gpu3d_poly *polys, size_t count, const gpu3d_span *spans, size_t nspans, size_t rowspans,
+		int w, int h, int y0, int y1, int t)
+	{ (void)polys; (void)count; (void)spans; (void)nspans; (void)rowspans; (void)w; (void)h; (void)y0; (void)y1; (void)t; return false; }
 };
 
 // Metal (gpu3d_metal.mm, Apple only): on `mtl_device` (an id<MTLDevice>), the system's default when
@@ -69,3 +83,6 @@ void gpu3d_metal_prewarm();
 // the polygons go up and each pixel's result comes back into the picture (no shared memory). The
 // x86-64 CPU rasterizer's pixels. Null if it can't.
 std::unique_ptr<gpu3d> gpu3d_create_sdlgpu(const char *driver = nullptr);   // (driver: SDL_GPU's, "vulkan"; none: SDL's choice)
+// The same on the device of SDL's "gpu" renderer (an SDL_GPUDevice *, the host's), which can draw
+// straight into the renderer's textures (draw_target). The device stays the renderer's.
+std::unique_ptr<gpu3d> gpu3d_create_sdlgpu_on(void *sdl_gpu_device);

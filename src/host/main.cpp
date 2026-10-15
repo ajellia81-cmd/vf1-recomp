@@ -875,7 +875,25 @@ int main(int argc, char **argv)
 	// to the terminal): take it, and again once the first picture is up if it still isn't ours.
 	if (!getenv("VF_HIDDEN")) SDL_RaiseWindow(win);
 	int focus_checks = 600;   // about 5 s: going fullscreen on a Mac moves to a new Space, which takes a while
-	SDL_Renderer *ren = SDL_CreateRenderer(win, nullptr);
+	SDL_Renderer *ren = nullptr;
+#if VF_GPU3D_SDL
+	// The 3D on the GPU wanted (Auto or GPU): SDL's "gpu" renderer (Direct3D 12 on Windows, Vulkan on
+	// Linux and the Deck), whose device the 3D's compute shares, drawing straight into the renderer's
+	// textures: nothing comes back to the CPU and nothing waits for the GPU (vf1-recomp #11: on a
+	// Radeon 780M at 6x each picture's 3D came back, 37 MB, was merged on the CPU and went up again,
+	// the GPU idle at its lowest clock in between). Else, or if it won't start or can't put pictures
+	// together exactly, SDL's usual one and the 3D on a device of its own, as before. (SDL_RENDER_DRIVER,
+	// SDL's own, chooses over this; VF_NO_GPU_RENDERER=1 skips it, tests. A start that closed while
+	// starting it leaves gpu-start.crashed, as the 3D's own start does below: SDL's usual one then.)
+	const std::string gpu_marker = dir + "/gpu-start.crashed";
+	if (cfg.renderer3d != 0 && !getenv("SDL_RENDER_DRIVER") && !getenv("VF_NO_GPU_RENDERER") && !SDL_GetPathInfo(gpu_marker.c_str(), nullptr)) {
+		if (SDL_IOStream *io = SDL_IOFromFile(gpu_marker.c_str(), "w")) SDL_CloseIO(io);
+		ren = SDL_CreateRenderer(win, "gpu");
+		SDL_RemovePath(gpu_marker.c_str());
+		if (!ren) fprintf(stderr, "SDL's gpu renderer: %s (SDL's usual renderer instead)\n", SDL_GetError());
+	}
+#endif
+	if (!ren) ren = SDL_CreateRenderer(win, nullptr);
 	if (!ren) return fail("Couldn't start the graphics");
 	SDL_SetRenderVSync(ren, 1);          // one picture per refresh of the screen (smooth motion fills them)
 	SDL_Texture *tex = nullptr;
@@ -945,20 +963,43 @@ int main(int argc, char **argv)
 	// first few of the game's own pictures are checked too. log.txt says which it is.
 	gpu_compose gc;
 	bool gpu_2d = false;
+	// two pixels within 2 a channel (the GPU's blend against the CPU's rounding)
+	auto near = [](uint32_t a, uint32_t b) {
+		for (int k = 0; k < 24; k += 8) if (std::abs(int((a >> k) & 0xff) - int((b >> k) & 0xff)) > 2) return false;
+		return true;
+	};
 	{
 		const char *rname = SDL_GetRendererName(ren);
 		std::string why;
 		if (getenv("VF_CPU_2D")) why = "VF_CPU_2D";
 		else if (!gc.init(ren)) why = "this renderer can't";
 		else if (gc.self_check(why)) gpu_2d = true;
+#if VF_GPU3D_SDL
+		if (!gpu_2d && rname && !strcmp(rname, "gpu") && !getenv("VF_CPU_2D")) {   // (SDL's usual one, which could)
+			fprintf(stderr, "SDL's gpu renderer can't put pictures together exactly (%s): SDL's usual renderer instead\n", why.c_str());
+			gc.reset();
+			SDL_DestroyRenderer(ren);
+			ren = SDL_CreateRenderer(win, nullptr);
+			if (!ren) return fail("Couldn't start the graphics");
+			SDL_SetRenderVSync(ren, 1);
+			rname = SDL_GetRendererName(ren);
+			why.clear();
+			if (!gc.init(ren)) why = "this renderer can't";
+			else if (gc.self_check(why)) gpu_2d = true;
+		}
+#endif
 		if (gpu_2d) fprintf(stderr, "pictures put together on the GPU (renderer: %s)\n", rname ? rname : "?");
 		else fprintf(stderr, "pictures drawn on the CPU (renderer: %s; %s)\n", rname ? rname : "?", why.c_str());
 	}
 	// The 3D on the GPU (src/gpu/gpu3d.h, Display > 3D renderer): on the device SDL's Metal renderer
-	// draws with; off the Mac SDL_GPU's (Direct3D 12 or Vulkan), a device of its own, made only when
-	// the setting isn't CPU (VF_3D=cpu|gpu|auto over it), its pictures checked against the CPU's
-	// before they're trusted. Any other renderer, or no GPU: the CPU's.
+	// draws with; off the Mac SDL_GPU's (Direct3D 12 or Vulkan): the device of SDL's "gpu" renderer
+	// when that's the renderer (its pictures straight into the renderer's textures), else a device of
+	// its own (each picture's 3D back to the CPU); made only when the setting isn't CPU (VF_3D=cpu|gpu|auto
+	// over it), its pictures checked against the CPU's before they're trusted. Any other renderer, or
+	// no GPU: the CPU's. (Tests: VF_G3_OWN_DEVICE=1 a device of its own anyway, VF_G3_NO_TARGET=1 the
+	// pictures back to the CPU anyway, VF_G3_NO_VERIFY=1 none checked.)
 	std::unique_ptr<gpu3d> g3;
+	bool g3_shared = false;       // (SDL_GPU: on the renderer's own device, drawing into its textures)
 	bool g3_next_start = false;   // (SDL_GPU: none made, the setting CPU as the game started)
 #if VF_GPU3D_METAL
 	{
@@ -978,7 +1019,11 @@ int main(int argc, char **argv)
 		if (cfg.renderer3d != 0 && !crashed) {
 			const uint64_t t0 = SDL_GetTicksNS();
 			if (SDL_IOStream *io = SDL_IOFromFile(marker.c_str(), "w")) SDL_CloseIO(io);
-			g3 = gpu3d_create_sdlgpu();
+			{
+				const char *rn = SDL_GetRendererName(ren);
+				if (gpu_2d && rn && !strcmp(rn, "gpu") && !getenv("VF_G3_OWN_DEVICE")) g3_shared = (g3 = gpu3d_create_sdlgpu_on(SDL_GetGPURendererDevice(ren))) != nullptr;
+			}
+			if (!g3) g3 = gpu3d_create_sdlgpu();
 			SDL_RemovePath(marker.c_str());
 			fprintf(stderr, "the 3D on the GPU: %s (%.0f ms to start)\n", g3 ? g3->name() : "none here (the CPU's 3D)", (SDL_GetTicksNS() - t0) / 1e6);
 		} else if (!crashed) {
@@ -992,9 +1037,11 @@ int main(int argc, char **argv)
 	if (g3) {
 		if (const char *r = getenv("GPU3D_REPEAT")) g3->test_repeat = std::max(1, atoi(r));   // tests: a slow GPU
 		m.set_gpu3d(g3.get());
+		m.set_gpu3d_target(g3_shared && !getenv("VF_G3_NO_TARGET"));   // (tests: the pictures back to the CPU anyway)
+		if (g3_shared) fprintf(stderr, "the 3D on the GPU: on the renderer's device, straight into its textures\n");
 		if (const char *c = getenv("VF_GPU3D_CHECK")) m.m_gpu3d_check = std::max(0, atoi(c));
 #if VF_GPU3D_SDL
-		m.m_gpu3d_verify = 3;   // (the game's pictures: three checked against the CPU's)
+		m.m_gpu3d_verify = getenv("VF_G3_NO_VERIFY") ? 0 : 3;   // (the game's pictures: three checked against the CPU's)
 #endif
 	}
 	// Auto: the GPU, unless clearly slower with the frame at risk (auto_gpu below). Measured before the first picture, unseen (a made-up fight's worth of polygons, a few
@@ -1036,7 +1083,12 @@ int main(int argc, char **argv)
 	// 1.5x the CPU's time and over half a frame (8 ms of the 16.7), so the frame's time is at risk
 	// (a GPU a little slower than a fast Mac's CPU, well inside the frame, is still the GPU). Back
 	// to the GPU once it's within 1.3x or under 6 ms.
-	auto auto_gpu = [](bool was, double c, double g) {
+	// Into the renderer's textures (g3_shared), nothing waits for the GPU: it draws alongside the CPU,
+	// and costs a frame only near a whole one (VF2's rule, vf2-recomp #10): the CPU only over 14 ms
+	// and well behind it. (The measure itself still waits for the GPU's picture to come back: an
+	// overestimate here.)
+	auto auto_gpu = [&](bool was, double c, double g) {
+		if (g3_shared && m.gpu3d_target()) return was ? !(g > 1.5 * c && g > 14.0) : (g <= 1.3 * c || g < 12.0);
 		return was ? !(g > 1.5 * c && g > 8.0) : (g <= 1.3 * c || g < 6.0);
 	};
 	auto apply_3d = [&] { m.set_gpu3d_on(g3 && !a3.broken && a3.gpu); m.m_gpu3d_chosen = cfg.renderer3d == 1; };
@@ -1078,6 +1130,8 @@ int main(int argc, char **argv)
 				else fprintf(stderr, "the 3D on the GPU (%s): its test picture failed\n", g3->name());
 				if (attempt == 0 && !strncmp(g3->name(), "direct3d12", 10) && !getenv("SDL_GPU_DRIVER")) {
 					m.set_gpu3d(nullptr);
+					m.set_gpu3d_target(false);
+					g3_shared = false;
 					g3.reset();
 					g3 = gpu3d_create_sdlgpu("vulkan");
 					fprintf(stderr, "the 3D on the GPU: trying Vulkan instead: %s\n", g3 ? g3->name() : "none here");
@@ -1139,6 +1193,11 @@ int main(int argc, char **argv)
 				fprintf(stderr, "the 3D: %s", renderer_name().c_str());
 				for (int k = 1; k >= 0; k--) if (n[k]) fprintf(stderr, ", the %s %.2f ms a picture (%d)", k ? "GPU" : "CPU", sum[k] / n[k], n[k]);
 				if (n[1]) fprintf(stderr, " [GPU: recording %.2f ms, on the GPU %.2f ms]", rsum / n[1], gsum / n[1]);
+				{
+					static uint64_t handed0 = 0;
+					if (m.m_g3.handed > handed0) fprintf(stderr, ", %llu straight into the renderer's texture (not waited for)", (unsigned long long)(m.m_g3.handed - handed0));
+					handed0 = m.m_g3.handed;
+				}
 				if (m.m_g3.checked) fprintf(stderr, ", checked %llu, %llu differ", (unsigned long long)m.m_g3.checked, (unsigned long long)m.m_g3.differ);
 				fprintf(stderr, "\n");
 				since = SDL_GetTicksNS(); sum[0] = sum[1] = gsum = rsum = 0; n[0] = n[1] = 0;
@@ -1175,6 +1234,43 @@ int main(int argc, char **argv)
 	std::set<int> gpu_failed;           // render scales the GPU couldn't put together (a part too large for it)
 	int gpu_verified = 0;               // the game's own pictures checked so far (the 1st, 60th and 600th)
 	model1::gpu_parts parts;
+	// The 3D's textures on the renderer's device (gpu3d::draw_target's), wrapped as the renderer's
+	// own, made before a picture that needs them: the picture's size, again when it changes. Any
+	// failure: the 3D comes back to the CPU as before, from then on.
+	SDL_Texture *g3_tex[model1::G3_TARGETS] = {};
+	uint64_t g3_wrapped = 0;
+	int g3_tw = 0, g3_th = 0;
+	auto g3_unwrap = [&] {
+		gc.set_3d_targets(g3_tex, 0);
+		for (SDL_Texture *&t : g3_tex) if (t) { SDL_DestroyTexture(t); t = nullptr; }
+		g3_wrapped = 0; g3_tw = g3_th = 0;
+	};
+	auto g3_prepare = [&] {
+		if (!g3 || !m.gpu3d_target()) return;
+		const int w = m.frame_w(), h = m.frame_h();
+		if (g3_tex[0] && g3_tw == w && g3_th == h && g3_wrapped == g3->targets_made()) return;
+		g3_unwrap();
+		bool ok = g3->make_targets(w, h, model1::G3_TARGETS);
+		for (int i = 0; ok && i < model1::G3_TARGETS; i++) {
+			SDL_PropertiesID pr = SDL_CreateProperties();
+			SDL_SetNumberProperty(pr, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, SDL_PIXELFORMAT_ABGR8888);   // (RGBA8 in memory)
+			SDL_SetNumberProperty(pr, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STATIC);
+			SDL_SetNumberProperty(pr, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, w);
+			SDL_SetNumberProperty(pr, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, h);
+			SDL_SetPointerProperty(pr, SDL_PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, g3->target_handle(i));
+			g3_tex[i] = SDL_CreateTextureWithProperties(ren, pr);
+			SDL_DestroyProperties(pr);
+			ok = g3_tex[i] != nullptr;
+		}
+		if (ok) ok = gc.set_3d_targets(g3_tex, model1::G3_TARGETS);
+		if (!ok) {
+			fprintf(stderr, "the 3D on the GPU: no %dx%d textures on the renderer for it (%s): its pictures come back to the CPU from now on\n", w, h, SDL_GetError());
+			g3_unwrap();
+			m.set_gpu3d_target(false);
+			return;
+		}
+		g3_wrapped = g3->targets_made(); g3_tw = w; g3_th = h;
+	};
 	bool show_target = false;           // the picture on show is the GPU's (else tex)
 	const int gpu_check = getenv("VF_GPU_CHECK") ? atoi(getenv("VF_GPU_CHECK")) : 0;   // testing: every nth checked
 	int gpu_pictures = 0, gpu_checked = 0, gpu_differ = 0;
@@ -1847,6 +1943,11 @@ int main(int argc, char **argv)
 				// picture on show goes up again, drawn whole.
 				gc.reset();
 				if (e.type == SDL_EVENT_RENDER_DEVICE_RESET) {
+					if (g3_tex[0]) {   // (the 3D's textures went with the device: back to the CPU from now on)
+						fprintf(stderr, "the 3D on the GPU: the renderer's device was reset: its pictures come back to the CPU from now on\n");
+						g3_unwrap();
+						m.set_gpu3d_target(false);
+					}
 					make_texture();
 					if (glass) { SDL_DestroyTexture(glass); glass = nullptr; }
 				}
@@ -1989,8 +2090,10 @@ int main(int argc, char **argv)
 				// (in parts when the GPU puts the pictures together: only the 3D drawn at the render scale)
 				bool probe_parts = false;
 				if (m.smooth() && sync.holding()) {
-					if (gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale()))
+					if (gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale())) {
+						g3_prepare();
 						probe_parts = m.render_parts(double(m.frame_number()), parts, false) == 1;
+					}
 					else m.render_smooth(double(m.frame_number()), false);
 				}
 				const bool was_holding = sync.holding();
@@ -2060,6 +2163,7 @@ int main(int argc, char **argv)
 				tp.now = t;
 				tp.kind = 'N';
 				if (gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale())) {
+					g3_prepare();
 					const int r = m.render_parts(t, parts);
 					const uint64_t tc = SDL_GetTicksNS();
 					tp.draw = tc - tr;
@@ -2074,8 +2178,11 @@ int main(int argc, char **argv)
 							gpu_verified++;
 							std::vector<uint32_t> back;
 							bool same = gc.read(back) && back.size() == size_t(m.frame_w()) * m.frame_h();
+							const bool from_target = parts.d3_target >= 0;
 							m.redraw();
-							for (size_t i = 0; same && i < back.size(); i++) same = back[i] == m.frame().data()[i];
+							// (the 3D straight into the renderer's texture: a shadow over the 2D is the GPU's
+							// blend, within a level or two of the CPU's rounding down; else exact)
+							for (size_t i = 0; same && i < back.size(); i++) same = from_target ? near(back[i], m.frame().data()[i]) : back[i] == m.frame().data()[i];
 							if (!same) {   // the CPU's picture, from now on
 								fprintf(stderr, "pictures drawn on the CPU from now on: the GPU's picture %d differs from the CPU's\n", gpu_pictures);
 								gpu_2d = false;
@@ -2088,7 +2195,8 @@ int main(int argc, char **argv)
 							if (gc.read(back)) {
 								m.redraw();
 								int n = 0;
-								for (size_t i = 0; i < back.size(); i++) n += back[i] != m.frame().data()[i];
+								const bool from_target = parts.d3_target >= 0;
+								for (size_t i = 0; i < back.size(); i++) n += from_target ? !near(back[i], m.frame().data()[i]) : back[i] != m.frame().data()[i];
 								gpu_checked++;
 								if (n) fprintf(stderr, "gpu check: picture %d: %d pixels differ (frame %llu, moment %.4f)\n", gpu_pictures, n, (unsigned long long)m.frame_number(), t);
 								if (n && getenv("VF_GPU_CHECK_DUMP")) {   // testing: both pictures
@@ -2325,6 +2433,8 @@ int main(int argc, char **argv)
 	if (g3) fprintf(stderr, "the 3D at the end: %llu pictures drawn by the GPU, %llu checked against the CPU's, %llu differ; %llu drawn by the CPU instead, %llu GPU errors\n",
 					(unsigned long long)m.m_g3.pictures, (unsigned long long)m.m_g3.checked, (unsigned long long)m.m_g3.differ,
 					(unsigned long long)m.m_g3.cpu_fallback, (unsigned long long)m.m_g3.failed);
+	if (m.m_g3.handed) fprintf(stderr, "the 3D at the end: %llu of the GPU's pictures straight into the renderer's texture\n", (unsigned long long)m.m_g3.handed);
+	g3_unwrap();                         // (the renderer's wraps of its textures go first)
 	m.set_gpu3d(nullptr);
 	g3.reset();                          // (its device goes before SDL does)
 	if (gpu_check) fprintf(stderr, "gpu check: %d pictures put together on the GPU checked, %d differ\n", gpu_checked, gpu_differ);

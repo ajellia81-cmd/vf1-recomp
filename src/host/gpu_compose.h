@@ -67,6 +67,17 @@ public:
 	}
 	~gpu_compose() { reset(); }
 	SDL_Texture *target() const { return m_target; }
+	// The 3D's own textures on the renderer's device (gpu3d::draw_target's, wrapped by the host): a
+	// picture with d3_target >= 0 takes its 3D from one of them, nothing uploaded. (The host's: not
+	// destroyed here.)
+	bool set_3d_targets(SDL_Texture *const *t, int n)
+	{
+		for (int i = 0; i < model1::G3_TARGETS; i++) {
+			m_ext3d[i] = i < n ? t[i] : nullptr;
+			if (m_ext3d[i] && (!SDL_SetTextureBlendMode(m_ext3d[i], m_keyed) || !SDL_SetTextureScaleMode(m_ext3d[i], SDL_SCALEMODE_NEAREST))) return false;
+		}
+		return true;
+	}
 	int made = 0;              // testing (VF_TRACE): textures made, and pixels uploaded
 	uint64_t uploaded = 0;
 
@@ -143,6 +154,11 @@ public:
 				SDL_SetRenderDrawBlendMode(m_ren, SDL_BLENDMODE_NONE);
 				SDL_SetRenderDrawColor(m_ren, Uint8(o.colour >> 16), Uint8(o.colour >> 8), Uint8(o.colour), 255);
 				SDL_RenderFillRect(m_ren, &d);
+			} else if (o.tex == model1::TEX_3D && p.d3_target >= 0) {
+				const SDL_FRect s{ o.sx, o.sy, o.sw, o.sh };
+				SDL_Texture *t = p.d3_target < model1::G3_TARGETS ? m_ext3d[p.d3_target] : nullptr;
+				if (!t) { if (clipped) SDL_SetRenderClipRect(m_ren, nullptr); SDL_SetRenderTarget(m_ren, before); return SDL_SetError("no texture for the GPU's 3D"); }
+				SDL_RenderTexture(m_ren, t, &s, &d);
 			} else if (m_tex[o.tex].tex) {
 				const SDL_FRect s{ o.sx, o.sy, o.sw, o.sh };
 				SDL_RenderTexture(m_ren, m_tex[o.tex].tex, &s, &d);
@@ -257,6 +273,7 @@ private:
 	struct pre_part { SDL_Texture *tex = nullptr; int w = 0, h = 0, rows = 0; uint64_t gen = ~0ull; } m_pre;
 	SDL_Renderer *m_ren = nullptr;
 	SDL_Texture *m_target = nullptr;
+	SDL_Texture *m_ext3d[model1::G3_TARGETS] = {};
 	int m_tw = 0, m_th = 0, m_max = 0;
 	part m_tex[model1::TEX_COUNT];
 	SDL_BlendMode m_keyed = SDL_BLENDMODE_NONE;

@@ -2233,6 +2233,29 @@ void model1::gpu3d_end(bitmap_rgb32 &bitmap)
 		if (m_check_cpu.width() != bitmap.width() || m_check_cpu.height() != bitmap.height()) m_check_cpu.allocate(bitmap.width(), bitmap.height());
 		memcpy(m_check_cpu.data(), bitmap.data(), size_t(bitmap.width()) * bitmap.height() * 4);
 	}
+	// Put together in parts on the 3D's own device: straight into the host's texture, nothing back
+	// (but a picture checked against the CPU's, or Low's smoothing, which reads the 3D's pixels, as
+	// before). A failure there: the usual way from now on.
+	if (m_g3_target && m_parts && !check && !m_rec_bad && !m_edge_aa && !m_rec_polys.empty()) {
+		const int t = m_g3_next;
+		if (m_gpu3d->make_targets(bitmap.width(), bitmap.height(), G3_TARGETS) &&
+			m_gpu3d->draw_target(m_rec_polys.data(), m_rec_polys.size(), m_rec_spans.data(), m_rec_spans.size(), size_t(m_rec_rows) * 2,
+								 bitmap.width(), bitmap.height(), m_rec_y0, m_rec_y1, t)) {
+			m_g3_next = (t + 1) % G3_TARGETS;
+			m_parts->d3_target = t;
+			m_g3.pictures++;
+			m_g3.gpu = true;
+			m_g3.gpu_ms = 0;
+			m_g3.rec_ms = m_rec_ms;
+			m_g3.polys = int(m_rec_polys.size());
+			m_g3.ms = m_rec_ms + (trace_ns() - t0) / 1e6;
+			m_g3.handed++;
+			m_rec_quads.clear();
+			return;
+		}
+		fprintf(stderr, "the 3D on the GPU: drawing into the renderer's texture failed: the pictures come back to the CPU from now on\n");
+		m_g3_target = false;
+	}
 	if (m_rec_bad) ok = false;
 	else if (!m_rec_polys.empty()) {
 		ok = m_gpu3d->draw(m_rec_polys.data(), m_rec_polys.size(), m_rec_spans.data(), m_rec_spans.size(), size_t(m_rec_rows) * 2,

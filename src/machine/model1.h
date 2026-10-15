@@ -183,6 +183,8 @@ public:
 		struct rect { int x0, y0, x1, y1; };       // [x0, x1) x [y0, y1)
 		std::vector<rect> d3_changed;               // what changed in TEX_3D (the rest stays as it was)
 		bool d3_all = false;                        // all of it
+		int d3_target = -1;                         // the 3D drawn by the GPU into the host's target texture
+		                                            // this many (gpu3d::draw_target), not into TEX_3D's image
 	};
 	// 1: drawn in parts; 2: drawn whole into frame() instead (a 4:3 screen's painted sides; the
 	// host leaves antialiasing to the CPU on its own); 0: nothing new (a cut's hold: the picture
@@ -484,6 +486,11 @@ public:
 	// recording. Off: the CPU's way, untouched.
 	void set_gpu3d(gpu3d *g) { m_gpu3d = g; }
 	void set_gpu3d_on(bool on) { m_gpu3d_on = on; }
+	// The host's renderer is on the 3D's GPU device (SDL's "gpu" renderer): pictures put together in
+	// parts have their 3D drawn straight into its textures (gpu_parts::d3_target), not into frame().
+	void set_gpu3d_target(bool on) { m_g3_target = on; }
+	bool gpu3d_target() const { return m_g3_target; }
+	static constexpr int G3_TARGETS = 2;   // (one being drawn while the last is shown)
 	bool gpu3d_on() const { return m_gpu3d && m_gpu3d_on; }
 	struct gpu3d_stats {
 		double ms = 0;          // the last picture's 3D drawing, wall time (CPU: the rasterizer's; GPU: recorded to drawn)
@@ -493,6 +500,7 @@ public:
 		int polys = 0;
 		uint64_t failed = 0, cpu_fallback = 0, checked = 0, differ = 0;   // errors; pictures the CPU drew instead; checks
 		uint64_t pictures = 0;  // drawn by the GPU
+		uint64_t handed = 0;    // of them, drawn straight into the host's texture (nothing waited for)
 	};
 	gpu3d_stats m_g3;
 	// Auto's measure (model1_video.cpp); differ: also the test picture drawn once more each way and
@@ -858,6 +866,8 @@ private:
 	void        raster_quads(bitmap_rgb32 &bitmap, view_t *view, int count);   // draw_quads' drawing (the CPU's)
 	// the GPU's recording (draw_quads in GPU mode)
 	gpu3d *m_gpu3d = nullptr;
+	bool m_g3_target = false;
+	int m_g3_next = 0;                                // the target the next picture's 3D goes into
 	bool m_gpu3d_on = false, m_rec = false, m_rec_bad = false;
 	struct rec_batch { int x1, x2, y1, y2; size_t first, count; };
 	std::vector<rec_batch> m_rec_batches;

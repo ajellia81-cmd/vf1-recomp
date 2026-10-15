@@ -593,6 +593,14 @@ void model1::set_akira_slot(int which)
 		else for (int b = 0; b < AT[i].size; b++) p[b] = uint8_t(TO[which][i] >> (8 * b));   // (little-endian)
 	}
 	akira_slot_heads(TO[which][MODEL1] < 0 ? 0 : 0xfd0000 | uint32_t(TO[which][MODEL1]));
+	// Siba's pounce (Up + Punch at a downed opponent): his moves table (fc78c4, his record's +4)
+	// has move 259 there, a placeholder's record (fc2722, five other moves': a jump with no jump in
+	// it), so the game planned a jump of 0 + 2 frames, the whole way in 2, and he flew on at that
+	// speed for his pounce's 26: across the ring, often out of it. Lau's pounce (381) in its place,
+	// as his table has it (Siba's moves are mostly Lau's).
+	constexpr uint32_t SIBA_POUNCE = 0xfc78c4 + 130 * 4;
+	if (SIBA_POUNCE + 4 <= rom.size() && (rom[SIBA_POUNCE + 1] == 0x01) && (rom[SIBA_POUNCE] == 0x03 || rom[SIBA_POUNCE] == 0x7d))
+		rom[SIBA_POUNCE] = which == 1 ? 0x7d : 0x03;   // (381 = 0x17d; 259 = 0x103)
 	// The select's camera for Akira's spot (fd278b: x, y, z, then 3 angles, a camera per place in
 	// the row): each head sits differently in its own frame (its origin, how it's turned), so each
 	// has its own: the eyes at the cast's height (a little below the middle), the face across the

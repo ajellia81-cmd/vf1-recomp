@@ -10,7 +10,7 @@ set -e
 cd "$(dirname "$0")/../.."
 OUT=build/shaders
 mkdir -p $OUT
-KERNELS="clear rows solid shadow pixels"
+KERNELS="clear rows solid shadow pixels target"
 FLAGS="-T cs_6_0 -E main -HV 2021 -O3"   # (-Gis, IEEE strictness, for DXIL: SPIR-V's would need Vulkan 1.2; `precise` does it there)
 if [ -z "$DXC" ] && [ -n "$DXC_LINUX" ]; then
 	docker run --rm --platform linux/amd64 -v "$PWD":/src -v "$DXC_LINUX":/dxc -w /src -e LD_LIBRARY_PATH=/dxc/lib ubuntu:24.04 \

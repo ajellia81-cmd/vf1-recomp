@@ -365,14 +365,13 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
       <div class="pop" role="dialog" aria-label="Known issues">
         <ul>
           <li>If something looks or plays differently from the arcade, say so in <a href="https://github.com/mr-finster/vf1-recomp/issues" target="_blank" rel="noopener">GitHub Issues</a>.</li>
-          <li>Secret characters: Siba's pounce on a downed opponent (Up + Punch) can send him flying across the ring. A fix is on the way.</li>
           <li>The Mac and Windows builds are <b>unsigned</b>: see Install for the one-time click-through.</li>
           <li>8BitDo pads on a Mac: use <b>Switch (S) mode</b>.</li>
         </ul>
       </div></span>
     <span class="info"><button class="lnk" aria-expanded="false">Changelog</button>
       <div class="pop" role="dialog" aria-label="Changelog">
-        <p><b>v1.2.1</b> &middot; Oct 15 2026</p>
+        <p><b>v1.3.0</b> &middot; %DATE%</p>
         <ul>
           <li><b>Secret characters:</b> Menu &gt; Cheats &gt; Secret character puts a fighter cut from the arcade ROM in Akira's spot: Siba, Jeff, Takeru (the early Akira), the Koskol brothers Rekka, Score and Aeon, or Dural. Unfinished in the original (borrowed moves, no throws).</li>
           <li><b>Portraits and icons made from the game's own 3D models:</b> only Siba ever got select-screen art. The rest were rendered by the game's own renderer from their real models in the ROM, then matched to the cast: eye height, centring and head size, and icons in the same 12-colour pixel-art look.</li>
@@ -383,8 +382,12 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
           <li><b>Windows:</b> the GPU renderer now works on AMD and older NVIDIA cards (Direct3D 12), with a Vulkan fallback.</li>
           <li><b>Menu button:</b> L3 + R3 or the touchpad click on any pad, remappable in Controls.</li>
           <li>The FPS counter hides while the menu is open; log.txt shows the version first.</li>
-          <li>Fixed: the player select keeps its widescreen sides with a secret character in Akira's spot, and they come in with the screen, with no blue flash from the title.</li>
+          <li><b>Faster GPU 3D on Windows and Steam Deck:</b> the 3D is drawn straight into the picture on the graphics card, with nothing copied back and forth and no waiting for the GPU, so high render scales and the KO cameras hold their frame rate.</li>
+          <li>Fixed: Siba's pounce (Up + Punch on a downed opponent) is Lau's now. His own had no jump in its data and flew him across the ring.</li>
         </ul>
+        <details><summary>v1.2.1</summary><ul>
+          <li>The player select keeps its widescreen sides with a secret character in Akira's spot, and they come in with the screen, with no blue flash from the title.</li>
+        </ul></details>
         <details><summary>v1.2.0</summary><ul>
           <li>Secret characters in Cheats, with portraits and icons made from their 3D models.</li>
           <li>Cheats: infinite energy, one-hit KO, no time limit, tiny or huge rings.</li>

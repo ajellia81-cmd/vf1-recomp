@@ -1,9 +1,13 @@
 // The 3D on the GPU through SDL_GPU (src/gpu/gpu3d.h): Direct3D 12 on Windows, Vulkan on Linux and
-// the Steam Deck (and Windows without Direct3D 12), on a device of its own (the host's renderer
-// stays SDL's usual one). gpu3d_metal.mm's passes, its shaders src/gpu/gpu3d.hlsl (precompiled into
-// gpu3d_shaders.h by tools/gpu/shaders.sh) with an x86-64 build's sums. The picture isn't the GPU's
-// memory here: the polygons and spans go up, each pixel's result comes back (res, and a byte a
-// pixel saying what it is) and is put into the picture on every core, the same pixels as Metal's.
+// the Steam Deck (and Windows without Direct3D 12). gpu3d_metal.mm's passes, its shaders
+// src/gpu/gpu3d.hlsl (precompiled into gpu3d_shaders.h by tools/gpu/shaders.sh) with an x86-64
+// build's sums. Two ways:
+//  - on the device of SDL's "gpu" renderer (gpu3d_create_sdlgpu_on), a picture put together in parts
+//    goes straight into one of the renderer's textures (draw_target): nothing comes back, nothing
+//    waits but for the picture before last in the same texture (at most two on the way);
+//  - else, and for the pictures checked against the CPU's, the polygons and spans go up and each
+//    pixel's result comes back (res, and a byte a pixel saying what it is) and is put into the
+//    picture on every core, the same pixels as Metal's (draw: waited for).
 #include "gpu3d.h"
 #include "gpu3d_shaders.h"
 #include "../machine/parallel.h"
@@ -25,7 +29,9 @@ public:
 	gpu3d_sdlgpu(SDL_GPUDevice *dev, bool own) : m_dev(dev), m_own(own) {}
 	~gpu3d_sdlgpu() override
 	{
-		for (SDL_GPUComputePipeline *p : { m_clear, m_rows, m_solid, m_shadow, m_pixels }) if (p) SDL_ReleaseGPUComputePipeline(m_dev, p);
+		wait_targets();
+		for (SDL_GPUComputePipeline *p : { m_clear, m_rows, m_solid, m_shadow, m_pixels, m_target }) if (p) SDL_ReleaseGPUComputePipeline(m_dev, p);
+		for (SDL_GPUTexture *t : m_tg) SDL_ReleaseGPUTexture(m_dev, t);
 		for (SDL_GPUBuffer *b : { m_pbuf, m_sbuf, m_jp, m_jb, m_owner, m_depth, m_shade, m_res, m_kind }) if (b) SDL_ReleaseGPUBuffer(m_dev, b);
 		if (m_up) SDL_ReleaseGPUTransferBuffer(m_dev, m_up);
 		if (m_down) SDL_ReleaseGPUTransferBuffer(m_dev, m_down);
@@ -38,7 +44,7 @@ public:
 		const bool spirv = (fm & SDL_GPU_SHADERFORMAT_SPIRV) != 0, dxil = (fm & SDL_GPU_SHADERFORMAT_DXIL) != 0;
 		if (!spirv && !dxil) { fprintf(stderr, "gpu3d sdl_gpu: %s takes neither SPIR-V nor DXIL\n", SDL_GetGPUDeviceDriver(m_dev)); return false; }
 		auto make = [&](const uint8_t *spv, size_t spv_n, const uint8_t *dx, size_t dx_n, const char *name,
-			uint32_t ro, uint32_t rwb, uint32_t tx, uint32_t ty) -> SDL_GPUComputePipeline * {
+			uint32_t ro, uint32_t rwb, uint32_t tx, uint32_t ty, uint32_t rwt = 0) -> SDL_GPUComputePipeline * {
 			SDL_GPUComputePipelineCreateInfo ci = {};
 			ci.code = spirv ? spv : dx;
 			ci.code_size = spirv ? spv_n : dx_n;
@@ -46,6 +52,7 @@ public:
 			ci.entrypoint = "main";
 			ci.num_readonly_storage_buffers = ro;
 			ci.num_readwrite_storage_buffers = rwb;
+			ci.num_readwrite_storage_textures = rwt;
 			ci.num_uniform_buffers = 1;
 			ci.threadcount_x = tx; ci.threadcount_y = ty; ci.threadcount_z = 1;
 			SDL_GPUComputePipeline *p = SDL_CreateGPUComputePipeline(m_dev, &ci);
@@ -60,6 +67,10 @@ public:
 		m_pixels = make(K(pixels), 3, 2, 8, 8);
 #undef K
 		if (!m_clear || !m_rows || !m_solid || !m_shadow || !m_pixels) return false;
+		// (straight into the renderer's textures: only on its device, and where RGBA8 can be written)
+		if (!m_own && SDL_GPUTextureSupportsFormat(m_dev, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SDL_GPU_TEXTURETYPE_2D,
+				SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE))
+			m_target = make(gpu3d_target_spv, sizeof gpu3d_target_spv, gpu3d_target_dxil, sizeof gpu3d_target_dxil, "target", 3, 0, 8, 8, 1);
 		const char *dn = SDL_GetStringProperty(SDL_GetGPUDeviceProperties(m_dev), SDL_PROP_GPU_DEVICE_NAME_STRING, "?");
 		snprintf(m_name, sizeof m_name, "%s (%s)", SDL_GetGPUDeviceDriver(m_dev), spirv ? "SPIR-V" : "DXIL");
 		fprintf(stderr, "gpu3d sdl_gpu: %s on %s, its pipelines ready in %.0f ms\n", m_name, dn,
@@ -71,12 +82,66 @@ public:
 	bool draw(const gpu3d_poly *polys, size_t count, const gpu3d_span *spans, size_t nspans, size_t rowspans,
 		uint32_t *px, size_t bytes, int w, int h, int y0, int y1, double *gpu_ms) override
 	{
+		if (w <= 0 || h <= 0 || bytes < size_t(w) * h * 4) return false;
+		return run(polys, count, spans, nspans, rowspans, px, w, h, y0, y1, gpu_ms, -1);
+	}
+
+	bool make_targets(int w, int h, int count) override
+	{
+		if (!m_target || w <= 0 || h <= 0 || count <= 0) return false;
+		if (m_tw == w && m_th == h && int(m_tg.size()) == count) return true;
+		wait_targets();
+		for (SDL_GPUTexture *t : m_tg) SDL_ReleaseGPUTexture(m_dev, t);
+		m_tg.clear();
+		m_tw = m_th = 0;
+		for (int i = 0; i < count; i++) {
+			SDL_GPUTextureCreateInfo ti = {};
+			ti.type = SDL_GPU_TEXTURETYPE_2D;
+			ti.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+			ti.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+			ti.width = uint32_t(w); ti.height = uint32_t(h);
+			ti.layer_count_or_depth = 1; ti.num_levels = 1;
+			ti.sample_count = SDL_GPU_SAMPLECOUNT_1;
+			SDL_GPUTexture *t = SDL_CreateGPUTexture(m_dev, &ti);
+			if (!t) { fprintf(stderr, "gpu3d sdl_gpu: a %dx%d target: %s\n", w, h, SDL_GetError()); return false; }
+			m_tg.push_back(t);
+		}
+		m_fence.assign(m_tg.size(), nullptr);
+		m_tw = w; m_th = h;
+		m_made++;
+		return true;
+	}
+	void *target_handle(int i) const override { return i >= 0 && i < int(m_tg.size()) ? m_tg[i] : nullptr; }
+	uint64_t targets_made() const override { return m_made; }
+	bool draw_target(const gpu3d_poly *polys, size_t count, const gpu3d_span *spans, size_t nspans, size_t rowspans,
+		int w, int h, int y0, int y1, int t) override
+	{
+		if (t < 0 || t >= int(m_tg.size()) || w != m_tw || h != m_th) return false;
+		// (the picture last drawn into this target done first: at most one a target on the way, so
+		// the CPU never runs further ahead of the GPU than that; it's long done unless the GPU is
+		// the slower)
+		if (m_fence[t]) {
+			const bool ok = SDL_WaitForGPUFences(m_dev, true, &m_fence[t], 1);
+			SDL_ReleaseGPUFence(m_dev, m_fence[t]);
+			m_fence[t] = nullptr;
+			if (!ok) { fprintf(stderr, "gpu3d sdl_gpu: a picture failed (%s)\n", SDL_GetError()); return false; }
+		}
+		return run(polys, count, spans, nspans, rowspans, nullptr, w, h, y0, y1, nullptr, t);
+	}
+
+private:
+	// The passes, then either each pixel's result back into px (target -1: waited for), or the
+	// picture into target t (handed over, not waited for).
+	bool run(const gpu3d_poly *polys, size_t count, const gpu3d_span *spans, size_t nspans, size_t rowspans,
+		uint32_t *px, int w, int h, int y0, int y1, double *gpu_ms, int target)
+	{
 		if (gpu_ms) *gpu_ms = 0;
 		y0 = std::max(y0, 0); y1 = std::min(y1, h - 1);
-		if (!count || y1 < y0) return true;
-		if (w <= 0 || h <= 0 || bytes < size_t(w) * h * 4) return false;
-		const uint32_t npx = uint32_t(w) * h, rows_n = uint32_t(y1 - y0 + 1), words = (uint32_t(w) + 3) / 4;
-		const uint32_t off = uint32_t(y0) * w, len = rows_n * uint32_t(w);
+		const bool to_target = target >= 0;
+		const bool none = !count || y1 < y0;
+		if (none && !to_target) return true;
+		const uint32_t npx = uint32_t(w) * h, rows_n = none ? 0 : uint32_t(y1 - y0 + 1), words = (uint32_t(w) + 3) / 4;
+		const uint32_t off = none ? 0 : uint32_t(y0) * w, len = rows_n * uint32_t(w);
 		m_jobpoly.clear(); m_jobbase.clear();
 		uint32_t rows = 0;
 		bool any_shadow = false;
@@ -88,94 +153,116 @@ public:
 			rows += uint32_t(polys[i].rows);
 		}
 		const uint32_t ns = uint32_t(nspans + rowspans);
-		const uint32_t pb = uint32_t(count * sizeof(gpu3d_poly)), sb = uint32_t(std::max<size_t>(ns, 1) * sizeof(gpu3d_span));
+		const uint32_t pb = uint32_t(std::max<size_t>(count, 1) * sizeof(gpu3d_poly)), sb = uint32_t(std::max<size_t>(ns, 1) * sizeof(gpu3d_span));
 		const uint32_t cs = uint32_t(nspans * sizeof(gpu3d_span)), jb = uint32_t(std::max<size_t>(m_jobpoly.size(), 1) * 4);
 		const uint32_t resb = len * 4, kindb = rows_n * words * 4;
 		if (!grow(m_pbuf, m_pbuf_n, pb, false) || !grow(m_sbuf, m_sbuf_n, sb, true) || !grow(m_jp, m_jp_n, jb, false) || !grow(m_jb, m_jb_n, jb, false)
 			|| !grow(m_owner, m_owner_n, npx * 4, true) || !grow(m_depth, m_depth_n, npx * 4, true) || !grow(m_shade, m_shade_n, npx * 4, true)
-			|| !grow(m_res, m_res_n, resb, true) || !grow(m_kind, m_kind_n, kindb, true)
-			|| !transfer(m_up, m_up_n, pb + cs + jb * 2, SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD)
-			|| !transfer(m_down, m_down_n, resb + kindb, SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD))
+			|| !transfer(m_up, m_up_n, pb + cs + jb * 2, SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD))
 			return false;
-		uint8_t *map = (uint8_t *)SDL_MapGPUTransferBuffer(m_dev, m_up, true);
-		if (!map) return false;
-		memcpy(map, polys, pb);
-		if (cs) memcpy(map + pb, spans, cs);
-		if (!m_jobpoly.empty()) { memcpy(map + pb + cs, m_jobpoly.data(), m_jobpoly.size() * 4); memcpy(map + pb + cs + jb, m_jobbase.data(), m_jobbase.size() * 4); }
-		SDL_UnmapGPUTransferBuffer(m_dev, m_up);
+		if (!to_target && (!grow(m_res, m_res_n, resb, true) || !grow(m_kind, m_kind_n, kindb, true)
+			|| !transfer(m_down, m_down_n, resb + kindb, SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD)))
+			return false;
 		const auto t0 = clk::now();
-		SDL_GPUCommandBuffer *cb = SDL_AcquireGPUCommandBuffer(m_dev);
-		if (!cb) return false;
-		{
-			SDL_GPUCopyPass *cp = SDL_BeginGPUCopyPass(cb);
-			auto up = [&](SDL_GPUBuffer *b, uint32_t at, uint32_t n) {
-				if (!n) return;
-				SDL_GPUTransferBufferLocation l = { m_up, at };
-				SDL_GPUBufferRegion r = { b, 0, n };
-				SDL_UploadToGPUBuffer(cp, &l, &r, false);
-			};
-			up(m_pbuf, 0, pb); up(m_sbuf, pb, cs);
-			if (!m_jobpoly.empty()) { up(m_jp, pb + cs, jb); up(m_jb, pb + cs + jb, jb); }
-			SDL_EndGPUCopyPass(cp);
+		SDL_GPUCommandBuffer *cb = nullptr;
+		if (!none) {
+			uint8_t *map = (uint8_t *)SDL_MapGPUTransferBuffer(m_dev, m_up, true);
+			if (!map) return false;
+			memcpy(map, polys, count * sizeof(gpu3d_poly));
+			if (cs) memcpy(map + pb, spans, cs);
+			if (!m_jobpoly.empty()) { memcpy(map + pb + cs, m_jobpoly.data(), m_jobpoly.size() * 4); memcpy(map + pb + cs + jb, m_jobbase.data(), m_jobbase.size() * 4); }
+			SDL_UnmapGPUTransferBuffer(m_dev, m_up);
+			cb = SDL_AcquireGPUCommandBuffer(m_dev);
+			if (!cb) return false;
+			{
+				SDL_GPUCopyPass *cp = SDL_BeginGPUCopyPass(cb);
+				auto up = [&](SDL_GPUBuffer *b, uint32_t at, uint32_t n) {
+					if (!n) return;
+					SDL_GPUTransferBufferLocation l = { m_up, at };
+					SDL_GPUBufferRegion r = { b, 0, n };
+					SDL_UploadToGPUBuffer(cp, &l, &r, false);
+				};
+				up(m_pbuf, 0, uint32_t(count * sizeof(gpu3d_poly))); up(m_sbuf, pb, cs);
+				if (!m_jobpoly.empty()) { up(m_jp, pb + cs, jb); up(m_jb, pb + cs + jb, jb); }
+				SDL_EndGPUCopyPass(cp);
+			}
+			const uint32_t W = uint32_t(w);
+			for (int rep = 0; rep < std::max(1, test_repeat); rep++) {
+				{
+					SDL_GPUStorageBufferReadWriteBinding bw[3] = {};
+					bw[0].buffer = m_owner; bw[1].buffer = m_depth; bw[2].buffer = m_shade;
+					SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, bw, 3);
+					SDL_BindGPUComputePipeline(c, m_clear);
+					const uint32_t k[4] = { off, len, 0, 0 };
+					SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
+					dispatch1(c, len);
+					SDL_EndGPUComputePass(c);
+				}
+				if (rows) {
+					SDL_GPUStorageBufferReadWriteBinding bw = {}; bw.buffer = m_sbuf;
+					SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, &bw, 1);
+					SDL_BindGPUComputePipeline(c, m_rows);
+					SDL_GPUBuffer *ro[3] = { m_pbuf, m_jp, m_jb };
+					SDL_BindGPUComputeStorageBuffers(c, 0, ro, 3);
+					const uint32_t k[4] = { rows, uint32_t(m_jobpoly.size()), uint32_t(nspans), 0 };
+					SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
+					dispatch1(c, rows);
+					SDL_EndGPUComputePass(c);
+				}
+				{
+					SDL_GPUStorageBufferReadWriteBinding bw[2] = {};
+					bw[0].buffer = m_owner; bw[1].buffer = m_depth;
+					SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, bw, 2);
+					SDL_BindGPUComputePipeline(c, m_solid);
+					SDL_GPUBuffer *ro[2] = { m_pbuf, m_sbuf };
+					SDL_BindGPUComputeStorageBuffers(c, 0, ro, 2);
+					const uint32_t k[4] = { ns, W, 0, 0 };
+					SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
+					dispatch1(c, ns * 8);
+					SDL_EndGPUComputePass(c);
+				}
+				if (any_shadow) {
+					SDL_GPUStorageBufferReadWriteBinding bw = {}; bw.buffer = m_shade;
+					SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, &bw, 1);
+					SDL_BindGPUComputePipeline(c, m_shadow);
+					SDL_GPUBuffer *ro[4] = { m_pbuf, m_sbuf, m_owner, m_depth };
+					SDL_BindGPUComputeStorageBuffers(c, 0, ro, 4);
+					const uint32_t k[4] = { ns, W, 0, 0 };
+					SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
+					dispatch1(c, ns);
+					SDL_EndGPUComputePass(c);
+				}
+				if (!to_target) {
+					SDL_GPUStorageBufferReadWriteBinding bw[2] = {};
+					bw[0].buffer = m_res; bw[1].buffer = m_kind;
+					SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, bw, 2);
+					SDL_BindGPUComputePipeline(c, m_pixels);
+					SDL_GPUBuffer *ro[3] = { m_pbuf, m_owner, m_shade };
+					SDL_BindGPUComputeStorageBuffers(c, 0, ro, 3);
+					const uint32_t k[4] = { W, uint32_t(y0), rows_n, 0 };
+					SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
+					SDL_DispatchGPUCompute(c, (words + 7) / 8, (rows_n + 7) / 8, 1);
+					SDL_EndGPUComputePass(c);
+				}
+			}
+		} else {
+			cb = SDL_AcquireGPUCommandBuffer(m_dev);
+			if (!cb) return false;
 		}
-		const uint32_t W = uint32_t(w);
-		for (int rep = 0; rep < std::max(1, test_repeat); rep++) {
-			{
-				SDL_GPUStorageBufferReadWriteBinding bw[3] = {};
-				bw[0].buffer = m_owner; bw[1].buffer = m_depth; bw[2].buffer = m_shade;
-				SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, bw, 3);
-				SDL_BindGPUComputePipeline(c, m_clear);
-				const uint32_t k[4] = { off, len, 0, 0 };
-				SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
-				dispatch1(c, len);
-				SDL_EndGPUComputePass(c);
-			}
-			if (rows) {
-				SDL_GPUStorageBufferReadWriteBinding bw = {}; bw.buffer = m_sbuf;
-				SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, &bw, 1);
-				SDL_BindGPUComputePipeline(c, m_rows);
-				SDL_GPUBuffer *ro[3] = { m_pbuf, m_jp, m_jb };
-				SDL_BindGPUComputeStorageBuffers(c, 0, ro, 3);
-				const uint32_t k[4] = { rows, uint32_t(m_jobpoly.size()), uint32_t(nspans), 0 };
-				SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
-				dispatch1(c, rows);
-				SDL_EndGPUComputePass(c);
-			}
-			{
-				SDL_GPUStorageBufferReadWriteBinding bw[2] = {};
-				bw[0].buffer = m_owner; bw[1].buffer = m_depth;
-				SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, bw, 2);
-				SDL_BindGPUComputePipeline(c, m_solid);
-				SDL_GPUBuffer *ro[2] = { m_pbuf, m_sbuf };
-				SDL_BindGPUComputeStorageBuffers(c, 0, ro, 2);
-				const uint32_t k[4] = { ns, W, 0, 0 };
-				SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
-				dispatch1(c, ns * 8);
-				SDL_EndGPUComputePass(c);
-			}
-			if (any_shadow) {
-				SDL_GPUStorageBufferReadWriteBinding bw = {}; bw.buffer = m_shade;
-				SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, &bw, 1);
-				SDL_BindGPUComputePipeline(c, m_shadow);
-				SDL_GPUBuffer *ro[4] = { m_pbuf, m_sbuf, m_owner, m_depth };
-				SDL_BindGPUComputeStorageBuffers(c, 0, ro, 4);
-				const uint32_t k[4] = { ns, W, 0, 0 };
-				SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
-				dispatch1(c, ns);
-				SDL_EndGPUComputePass(c);
-			}
-			{
-				SDL_GPUStorageBufferReadWriteBinding bw[2] = {};
-				bw[0].buffer = m_res; bw[1].buffer = m_kind;
-				SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, bw, 2);
-				SDL_BindGPUComputePipeline(c, m_pixels);
-				SDL_GPUBuffer *ro[3] = { m_pbuf, m_owner, m_shade };
-				SDL_BindGPUComputeStorageBuffers(c, 0, ro, 3);
-				const uint32_t k[4] = { W, uint32_t(y0), rows_n, 0 };
-				SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
-				SDL_DispatchGPUCompute(c, (words + 7) / 8, (rows_n + 7) / 8, 1);
-				SDL_EndGPUComputePass(c);
-			}
+		if (to_target) {   // (none: the target all clear)
+			SDL_GPUStorageTextureReadWriteBinding tw = {};
+			tw.texture = m_tg[target];
+			SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, &tw, 1, nullptr, 0);
+			SDL_BindGPUComputePipeline(c, m_target);
+			SDL_GPUBuffer *ro[3] = { m_pbuf, m_owner, m_shade };
+			SDL_BindGPUComputeStorageBuffers(c, 0, ro, 3);
+			const uint32_t k[4] = { uint32_t(w), uint32_t(h), none ? 1u : uint32_t(y0), none ? 0u : uint32_t(y1) };
+			SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
+			SDL_DispatchGPUCompute(c, (uint32_t(w) + 7) / 8, (uint32_t(h) + 7) / 8, 1);
+			SDL_EndGPUComputePass(c);
+			m_fence[target] = SDL_SubmitGPUCommandBufferAndAcquireFence(cb);
+			if (!m_fence[target]) { fprintf(stderr, "gpu3d sdl_gpu: submit: %s\n", SDL_GetError()); return false; }
+			return true;
 		}
 		{
 			SDL_GPUCopyPass *cp = SDL_BeginGPUCopyPass(cb);
@@ -219,7 +306,6 @@ public:
 		return true;
 	}
 
-private:
 	bool grow(SDL_GPUBuffer *&b, uint32_t &have, uint32_t n, bool rw)
 	{
 		n = std::max<uint32_t>(n, 16);
@@ -244,6 +330,11 @@ private:
 		if (!t) fprintf(stderr, "gpu3d sdl_gpu: a transfer buffer of %u bytes: %s\n", have, SDL_GetError());
 		return t != nullptr;
 	}
+	void wait_targets()
+	{
+		for (SDL_GPUFence *&f : m_fence)
+			if (f) { SDL_WaitForGPUFences(m_dev, true, &f, 1); SDL_ReleaseGPUFence(m_dev, f); f = nullptr; }
+	}
 	static void dispatch1(SDL_GPUComputePass *c, uint32_t n)
 	{
 		if (!n) return;
@@ -254,7 +345,11 @@ private:
 	SDL_GPUDevice *m_dev;
 	bool m_own;
 	char m_name[64] = "sdl_gpu";
-	SDL_GPUComputePipeline *m_clear = nullptr, *m_rows = nullptr, *m_solid = nullptr, *m_shadow = nullptr, *m_pixels = nullptr;
+	SDL_GPUComputePipeline *m_clear = nullptr, *m_rows = nullptr, *m_solid = nullptr, *m_shadow = nullptr, *m_pixels = nullptr, *m_target = nullptr;
+	std::vector<SDL_GPUTexture *> m_tg;
+	std::vector<SDL_GPUFence *> m_fence;   // each target's last picture
+	int m_tw = 0, m_th = 0;
+	uint64_t m_made = 0;
 	SDL_GPUBuffer *m_pbuf = nullptr, *m_sbuf = nullptr, *m_jp = nullptr, *m_jb = nullptr, *m_owner = nullptr, *m_depth = nullptr, *m_shade = nullptr, *m_res = nullptr, *m_kind = nullptr;
 	uint32_t m_pbuf_n = 0, m_sbuf_n = 0, m_jp_n = 0, m_jb_n = 0, m_owner_n = 0, m_depth_n = 0, m_shade_n = 0, m_res_n = 0, m_kind_n = 0;
 	SDL_GPUTransferBuffer *m_up = nullptr, *m_down = nullptr;
@@ -270,6 +365,14 @@ std::unique_ptr<gpu3d> gpu3d_create_sdlgpu(const char *driver)
 	SDL_GPUDevice *dev = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXIL, getenv("GPU3D_VALIDATE") != nullptr, driver);
 	if (!dev) { fprintf(stderr, "gpu3d sdl_gpu: no device: %s\n", SDL_GetError()); return nullptr; }
 	auto g = std::make_unique<gpu3d_sdlgpu>(dev, true);
+	if (!g->init()) return nullptr;
+	return g;
+}
+
+std::unique_ptr<gpu3d> gpu3d_create_sdlgpu_on(void *sdl_gpu_device)
+{
+	if (!sdl_gpu_device) return nullptr;
+	auto g = std::make_unique<gpu3d_sdlgpu>(static_cast<SDL_GPUDevice *>(sdl_gpu_device), false);
 	if (!g->init()) return nullptr;
 	return g;
 }

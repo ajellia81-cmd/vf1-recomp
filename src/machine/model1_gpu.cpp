@@ -24,6 +24,7 @@ int model1::render_parts(double now, gpu_parts &p, bool shown)
 	p.ops.clear();
 	p.d3_changed.clear();
 	p.d3_all = false;
+	p.d3_target = -1;
 	for (auto &i : p.img) i.px = nullptr;
 	m_last_parts = nullptr;
 	if (!m_smooth || (m_scale == 1 && m_ext == 0)) return render_smooth(now, shown) ? 2 : 0;   // (1x 4:3: the arcade's own)
@@ -36,6 +37,7 @@ int model1::render_parts(double now, gpu_parts &p, bool shown)
 		// the same moment again, whole (as redraw() does: the stage sky's settling isn't counted twice)
 		p.ops.clear();
 		p.d3_changed.clear();
+		p.d3_target = -1;
 		m_redrawing = true;
 		render_smooth(now, shown);
 		m_redrawing = false;
