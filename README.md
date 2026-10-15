@@ -50,7 +50,49 @@ your screen's refresh rate.
 | Menu, keyboard and gamepads, two players | Working |
 | macOS, Windows, Steam Deck / x86-64 Linux | Working |
 | Painted widescreen sides for the title and player select | Working in the downloads; not in this repository (4:3 without them) |
+| Secret characters and cheats (menu > Cheats) | Working: see below |
 | Online play | Not yet |
+
+## Secret characters
+
+Menu > Cheats > **Secret character** puts a fighter cut from the arcade ROM in Akira's spot on the player select:
+Siba (Majido), Jeff, Takeru (the early Akira), the Koskol brothers Rekka, Score and Aeon, and Dural. They were never
+finished (borrowed moves, no throws), so expect oddities.
+
+**Portraits and icons made from the game's own models.** Only Siba ever got select art; the rest had none, so the
+select screen showed Akira's (or nothing). Each one now has a portrait and an icon drawn from its real 3D head in the
+ROM, by the game's own renderer:
+
+- **Portraits:** the game's select screen draws a live 3D head in a camera of its own per character. The ones without
+  a portrait get one built from their fight head, and each has its own camera, found by rendering every head against
+  the cast's and measuring: the eyes at the same height, the face in the middle, the head the same size, the neck off
+  the bottom. Dural's is also turned to face the way the others do.
+- **Icons:** the select row's icons are flat pixel art, not 3D. Each new one is the character's head rendered by the
+  game at a three-quarter turn, then fitted to Akira's real icon: the same framing and scale (found by matching a render
+  of Akira's head to his icon), the same brightness, and cut down to 12 colours in his frame, so it sits in the row
+  like the originals. While one is in Akira's spot, the game's tiles for his icon are swapped for it, and put back
+  after. The tools are in `tools/icons`; the icons ship with the downloads, not in this repository.
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/fe3dc5a5-1e77-413d-8c21-c08bcd572c8c" alt="The secret characters in action at 3x: Dural, Siba, Jeff, Takeru and Rekka on five stages, and Jeff on the player select" width="800">
+</p>
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/eb2039b9-087b-4d73-8241-af9e0a29efda" alt="The cast's select portraits, and the secret characters' below" width="800">
+</p>
+
+| Character | Select screen | Health bar | Notes |
+| --- | --- | --- | --- |
+| Siba (Majido) | Own portrait, icon and profile; named MAJIDO (P1) or SHIIBA (P2) | MAJIDO | The most complete of them |
+| Jeff | Own portrait and profile, a made icon; named JEFFERY | JEFF | An early Jeffry |
+| Takeru | Akira's name and profile, a made icon | AKIRA | The early Akira, in Akira's headband |
+| Rekka | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | Rekka and Score share a head |
+| Score | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | Looks like Rekka |
+| Aeon | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | |
+| Dural | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | |
+
+They take Akira's place, so arcade mode's CPU Akira is them too, and Akira can't be picked while one is on. The rest
+of Cheats: infinite energy (player 1, 2 or both), one-hit KO, no time limit, and a tiny or huge ring. They come from
+mountainmanjed's MAME cheats, documented on [The Cutting Room Floor](https://tcrf.net/Virtua_Fighter_(Arcade)).
 
 ## Play
 

@@ -51,6 +51,8 @@ Display: render scale (up to 6x), antialiasing, picture shape (fits the window: 
 ultrawide), background filter, fullscreen. Sound: volume, music, effects and voices.
 Game: play style (PC: free play, no boot screen / arcade: coins and credits), reset.
 Controls: each player's pad, keys and buttons.
+Cheats: a secret character in Akira's spot (Siba, Jeff, Takeru, the Koskol brothers or Dural:
+cut from the game, unfinished), infinite energy, one-hit KO, no time limit, a tiny or huge ring.
 3D renderer: Auto (the default) draws the 3D on the graphics card, the same picture as the CPU,
 unless it is clearly slower on your machine; GPU or CPU to choose yourself. If the GPU ever
 draws differently or fails, the game uses the CPU for that run (log.txt says so).
