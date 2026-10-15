@@ -132,6 +132,7 @@ main{--s:1; position:relative; z-index:1; width:100%; min-width:0; margin-block:
 .pop details.closing summary::after{content:"+"}
 .pop p+ul{margin-top:.3rem}
 .pop b{color:var(--ink)}
+.pop a{color:var(--ink); text-decoration:underline; text-underline-offset:2px}
 .pop code{font:500 .78rem ui-monospace,"SF Mono",Menlo,Consolas,monospace; color:var(--ink); background:#04061A; border-radius:5px; padding:.05rem .35rem}
 .pop table{width:100%; border-collapse:collapse; font-size:.84rem; line-height:1.4}
 .pop td{padding:.34rem 0; vertical-align:top; border-top:1px solid rgba(255,255,255,.07)}
@@ -363,7 +364,8 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
     <span class="info"><button class="lnk" aria-expanded="false">Known issues</button>
       <div class="pop" role="dialog" aria-label="Known issues">
         <ul>
-          <li>If something looks or plays differently from the arcade, say so in the thread.</li>
+          <li>If something looks or plays differently from the arcade, say so in <a href="https://github.com/mr-finster/vf1-recomp/issues" target="_blank" rel="noopener">GitHub Issues</a>.</li>
+          <li>Secret characters: Siba's pounce on a downed opponent (Up + Punch) can send him flying across the ring. A fix is on the way.</li>
           <li>The Mac and Windows builds are <b>unsigned</b>: see Install for the one-time click-through.</li>
           <li>8BitDo pads on a Mac: use <b>Switch (S) mode</b>.</li>
         </ul>
