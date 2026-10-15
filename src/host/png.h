@@ -1,20 +1,19 @@
-// Minimal PNG writer (RGB, or RGBA from ARGB; zlib from the system).
+// Minimal PNG writer (RGB, zlib from the system).
 #pragma once
 #include <cstdint>
 #include <cstdio>
 #include <vector>
 #include <zlib.h>
 
-inline bool write_png(const char *path, const uint32_t *xrgb, int w, int h, bool alpha = false)
+inline bool write_png(const char *path, const uint32_t *xrgb, int w, int h)
 {
 	std::vector<uint8_t> raw;
-	raw.reserve(size_t(h) * (w * (alpha ? 4 : 3) + 1));
+	raw.reserve(size_t(h) * (w * 3 + 1));
 	for (int y = 0; y < h; y++) {
 		raw.push_back(0);
 		for (int x = 0; x < w; x++) {
 			uint32_t p = xrgb[size_t(y) * w + x];
 			raw.push_back(p >> 16); raw.push_back(p >> 8); raw.push_back(p);
-			if (alpha) raw.push_back(p >> 24);
 		}
 	}
 	uLongf zlen = compressBound(raw.size());
@@ -33,7 +32,7 @@ inline bool write_png(const char *path, const uint32_t *xrgb, int w, int h, bool
 	static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
 	fwrite(sig, 1, 8, f);
 	uint8_t ihdr[13] = {uint8_t(w >> 24), uint8_t(w >> 16), uint8_t(w >> 8), uint8_t(w),
-						uint8_t(h >> 24), uint8_t(h >> 16), uint8_t(h >> 8), uint8_t(h), 8, uint8_t(alpha ? 6 : 2), 0, 0, 0};
+						uint8_t(h >> 24), uint8_t(h >> 16), uint8_t(h >> 8), uint8_t(h), 8, 2, 0, 0, 0};
 	chunk("IHDR", ihdr, 13);
 	chunk("IDAT", z.data(), uint32_t(zlen));
 	chunk("IEND", nullptr, 0);
