@@ -115,7 +115,7 @@ Change them in the menu (<kbd>Esc</kbd>, or View / Select on a pad).
 | <kbd>I</kbd> <kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd> | Player 2: move |
 | <kbd>B</kbd> <kbd>N</kbd> <kbd>M</kbd> | Player 2: guard, punch, kick |
 | <kbd>2</kbd> | Player 2: start |
-| <kbd>Esc</kbd> | Menu: display (render scale, picture shape, antialiasing, 3D renderer...), sound, game, controls, quit |
+| <kbd>Esc</kbd> | Menu: display (render scale, picture shape, antialiasing, 3D renderer...), sound, game, controls, cheats (the unused characters), quit |
 | <kbd>P</kbd> | Pause |
 | <kbd>F3</kbd> | Reset |
 | <kbd>F5</kbd> / <kbd>F6</kbd> | Render scale / picture shape |
@@ -124,8 +124,9 @@ Change them in the menu (<kbd>Esc</kbd>, or View / Select on a pad).
 | <kbd>F12</kbd> | Screenshot |
 
 Gamepad (Xbox layout): d-pad or stick to move, X guard, A punch, B kick, Y guard + punch (throws), RB punch + kick,
-LB guard + kick, RT all three, Start to start. View (tap) opens the menu; View + LB / RB change the render scale /
-picture shape.
+LB guard + kick, RT all three, Start to start. View (tap), L3 + R3 or the touchpad click opens the menu (Menu can be
+moved in Controls); View + LB / RB change the render scale / picture shape. In Arcade mode, set Coin in Controls (View
+works) for a coin button.
 
 ## How it works
 
@@ -197,6 +198,11 @@ sound board (R. Belmont), all BSD-3-Clause. Also Musashi (Karl Stenerud, MIT), y
 SLJIT (Zoltan Herczeg, BSD-2-Clause), the Z80 core (Nicolas Allemand, MIT), RmlUi (MIT), GLM (MIT), stb_image
 (Sean Barrett, public domain / MIT), SDL 3 (zlib), FreeType (FreeType License) and the Barlow Condensed font (SIL
 Open Font License). `tools/release/licenses.sh` gathers their notices for the downloads.
+
+Thanks to everyone who tested and reported: [svera](https://github.com/svera) (portable mode, the unused
+characters), [terryarcade](https://github.com/terryarcade), [chocolatelily-0716](https://github.com/chocolatelily-0716),
+[vmicka72](https://github.com/vmicka72) and [aadsasdasd](https://github.com/aadsasdasd). The secret characters come
+from mountainmanjed's MAME cheats, documented on [The Cutting Room Floor](https://tcrf.net/Virtua_Fighter_(Arcade)).
 
 Virtua Fighter is SEGA's. This project is not affiliated with or endorsed by SEGA.
 

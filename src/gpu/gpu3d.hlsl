@@ -14,6 +14,14 @@
 // Built once per kernel (-D K_CLEAR, K_ROWS, K_SOLID, K_SHADOW, K_PIXELS) by tools/gpu/shaders.sh
 // into src/gpu/gpu3d_shaders.h; resources in SDL_GPU's layout for compute (read-only storage
 // buffers t0.. space 0, read-write u0.. space 1, uniforms b0 space 2).
+//
+// Every buffer is a byte-address buffer (ByteAddressBuffer, loads and stores by byte offset), not a
+// structured buffer: SDL_GPU's Direct3D 12 backend binds storage buffers as raw views (R32_TYPELESS,
+// D3D12_BUFFER_*_FLAG_RAW), and a raw view in a structured buffer's slot is undefined there. NVIDIA's
+// recent drivers read it anyway; AMD's (a Radeon 780M, vf1-recomp #10) drew nothing. Vulkan has no
+// such distinction (SPIR-V's storage buffers are the same either way).
+#define LD(b, i) (b).Load((i) * 4u)
+#define ST(b, i, v) (b).Store((i) * 4u, (v))
 
 float fdiv(float a, float b)
 {
@@ -79,25 +87,25 @@ struct span { uint poly; int y; int xa; int xb; };
 
 // ---- the region's owners, depths and shadows cleared ----
 #ifdef K_CLEAR
-RWStructuredBuffer<uint> owner : register(u0, space1);
-RWStructuredBuffer<uint> depth : register(u1, space1);
-RWStructuredBuffer<uint> shade : register(u2, space1);
+RWByteAddressBuffer owner : register(u0, space1);
+RWByteAddressBuffer depth : register(u1, space1);
+RWByteAddressBuffer shade : register(u2, space1);
 cbuffer k : register(b0, space2) { uint k_off; uint k_n; uint k_pad0; uint k_pad1; };
 [numthreads(64, 1, 1)]
 void main(uint3 t : SV_DispatchThreadID)
 {
 	const uint i = t.x + t.y * 65535u * 64u;
 	if (i >= k_n) return;
-	owner[k_off + i] = 0u; depth[k_off + i] = 0u; shade[k_off + i] = 0xffffffffu;
+	ST(owner, k_off + i, 0u); ST(depth, k_off + i, 0u); ST(shade, k_off + i, 0xffffffffu);
 }
 #endif
 
 // ---- above 1x: a polygon's row, as fill_quad_hd works it out (two spans at most) ----
 #ifdef K_ROWS
-StructuredBuffer<poly> polys : register(t0, space0);
-StructuredBuffer<uint> jobpoly : register(t1, space0);
-StructuredBuffer<uint> jobbase : register(t2, space0);
-RWStructuredBuffer<span> spans : register(u0, space1);
+ByteAddressBuffer polys : register(t0, space0);
+ByteAddressBuffer jobpoly : register(t1, space0);
+ByteAddressBuffer jobbase : register(t2, space0);
+RWByteAddressBuffer spans : register(u0, space1);
 cbuffer k : register(b0, space2) { uint k_total; uint k_jobs; uint k_first; uint k_pad0; };
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID)
@@ -105,15 +113,15 @@ void main(uint3 tid : SV_DispatchThreadID)
 	const uint t = tid.x + tid.y * 65535u * 64u;
 	if (t >= k_total) return;
 	uint lo = 0, hi = k_jobs - 1;
-	while (lo < hi) { const uint mid = (lo + hi + 1) >> 1; if (jobbase[mid] <= t) lo = mid; else hi = mid - 1; }
-	const uint idx = jobpoly[lo];
-	const poly q = polys[idx];
-	const uint r = t - jobbase[lo];
+	while (lo < hi) { const uint mid = (lo + hi + 1) >> 1; if (LD(jobbase, mid) <= t) lo = mid; else hi = mid - 1; }
+	const uint idx = LD(jobpoly, lo);
+	const poly q = polys.Load<poly>((idx) * sizeof(poly));
+	const uint r = t - LD(jobbase, lo);
 	const int y = q.y0 + int(r);
 	const uint at = k_first + q.span0 + 2u * r;
 	span none; none.poly = idx; none.y = y; none.xa = 1; none.xb = 0;
-	spans[at] = none;
-	spans[at + 1] = none;
+	spans.Store<span>((at) * sizeof(span), none);
+	spans.Store<span>((at + 1) * sizeof(span), none);
 	precise const float yc = float(y) + 0.5f;
 	float xs[4];
 	int n = 0;
@@ -137,17 +145,17 @@ void main(uint3 tid : SV_DispatchThreadID)
 		s.poly = idx; s.y = y;
 		s.xa = max(q.cx0, ftoi(ceil(sa)));
 		s.xb = min(q.cx1, ftoi(ceil(sb)) - 1);
-		spans[at + uint(k >> 1)] = s;
+		spans.Store<span>((at + uint(k >> 1)) * sizeof(span), s);
 	}
 }
 #endif
 
 // ---- each pixel's last solid polygon (its place + 1; 0 none) ----
 #ifdef K_SOLID
-StructuredBuffer<poly> polys : register(t0, space0);
-StructuredBuffer<span> spans : register(t1, space0);
-RWStructuredBuffer<uint> owner : register(u0, space1);
-RWStructuredBuffer<uint> depth : register(u1, space1);
+ByteAddressBuffer polys : register(t0, space0);
+ByteAddressBuffer spans : register(t1, space0);
+RWByteAddressBuffer owner : register(u0, space1);
+RWByteAddressBuffer depth : register(u1, space1);
 cbuffer k : register(b0, space2) { uint k_total; uint k_W; uint k_pad0; uint k_pad1; };
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID)
@@ -155,64 +163,64 @@ void main(uint3 tid : SV_DispatchThreadID)
 	const uint t = tid.x + tid.y * 65535u * 64u;
 	if (t / L >= k_total) return;
 	const int lane = int(t % L);
-	const span s = spans[t / L];
+	const span s = spans.Load<span>((t / L) * sizeof(span));
 	if (s.xa > s.xb) return;
-	const uint f = polys[s.poly].flags;
+	const uint f = polys.Load<poly>((s.poly) * sizeof(poly)).flags;
 	if (f & SHADOW) return;
 	const uint row = uint(s.y) * k_W;
 	const uint v = s.poly + 1u;
 	uint was;
 	if (!(f & (CHECKER | LINE))) {   // (the polygons a fighter's shadow looks under: model1::s_owner's)
-		for (int x = s.xa + lane; x <= s.xb; x += int(L)) { InterlockedMax(owner[row + uint(x)], v, was); InterlockedMax(depth[row + uint(x)], v, was); }
+		for (int x = s.xa + lane; x <= s.xb; x += int(L)) { owner.InterlockedMax((row + uint(x)) * 4u, v, was); depth.InterlockedMax((row + uint(x)) * 4u, v, was); }
 		return;
 	}
 	if (f & CHECKER) {
-		for (int x2 = s.xa + ((s.xa ^ s.y) & 1) + 2 * lane; x2 <= s.xb; x2 += 2 * int(L)) InterlockedMax(owner[row + uint(x2)], v, was);
+		for (int x2 = s.xa + ((s.xa ^ s.y) & 1) + 2 * lane; x2 <= s.xb; x2 += 2 * int(L)) owner.InterlockedMax((row + uint(x2)) * 4u, v, was);
 	} else
-		for (int x3 = s.xa + lane; x3 <= s.xb; x3 += int(L)) InterlockedMax(owner[row + uint(x3)], v, was);
+		for (int x3 = s.xa + lane; x3 <= s.xb; x3 += int(L)) owner.InterlockedMax((row + uint(x3)) * 4u, v, was);
 }
 #endif
 
 // ---- each pixel's first shadow after that (its place; ~0 none) ----
 #ifdef K_SHADOW
-StructuredBuffer<poly> polys : register(t0, space0);
-StructuredBuffer<span> spans : register(t1, space0);
-StructuredBuffer<uint> owner : register(t2, space0);
-StructuredBuffer<uint> depth : register(t3, space0);
-RWStructuredBuffer<uint> shade : register(u0, space1);
+ByteAddressBuffer polys : register(t0, space0);
+ByteAddressBuffer spans : register(t1, space0);
+ByteAddressBuffer owner : register(t2, space0);
+ByteAddressBuffer depth : register(t3, space0);
+RWByteAddressBuffer shade : register(u0, space1);
 cbuffer k : register(b0, space2) { uint k_total; uint k_W; uint k_pad0; uint k_pad1; };
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID)
 {
 	const uint t = tid.x + tid.y * 65535u * 64u;
 	if (t >= k_total) return;
-	const span s = spans[t];
+	const span s = spans.Load<span>((t) * sizeof(span));
 	if (s.xa > s.xb) return;
-	const poly q = polys[s.poly];
+	const poly q = polys.Load<poly>((s.poly) * sizeof(poly));
 	if (!(q.flags & SHADOW)) return;
 	const bool fighter = (q.flags & FIGHTER) != 0u;
 	const uint at = uint(s.y) * k_W;
 	uint was;
 	for (int x = s.xa; x <= s.xb; x++) {
-		const uint o = owner[at + uint(x)];
+		const uint o = LD(owner, at + uint(x));
 		if (o > s.poly) continue;                 // a solid polygon (or line) drawn after it
-		const uint d = fighter ? depth[at + uint(x)] : 0u;
+		const uint d = fighter ? LD(depth, at + uint(x)) : 0u;
 		if (d) {                                  // a fighter's shadow: not over a fighter's polygon in its own list
-			const poly u = polys[d - 1u];
+			const poly u = polys.Load<poly>((d - 1u) * sizeof(poly));
 			if (u.batch == q.batch && !(u.flags & STAGE)) continue;
 		}
-		InterlockedMin(shade[at + uint(x)], s.poly, was);
+		shade.InterlockedMin((at + uint(x)) * 4u, s.poly, was);
 	}
 }
 #endif
 
 // ---- the pixels: the solid colour, or a shadow's half over the picture beneath (for the CPU) ----
 #ifdef K_PIXELS
-StructuredBuffer<poly> polys : register(t0, space0);
-StructuredBuffer<uint> owner : register(t1, space0);
-StructuredBuffer<uint> shade : register(t2, space0);
-RWStructuredBuffer<uint> res : register(u0, space1);    // the region's rows (from y0), W apart
-RWStructuredBuffer<uint> kind : register(u1, space1);   // a byte a pixel, rows (W + 3) / 4 words apart
+ByteAddressBuffer polys : register(t0, space0);
+ByteAddressBuffer owner : register(t1, space0);
+ByteAddressBuffer shade : register(t2, space0);
+RWByteAddressBuffer res : register(u0, space1);    // the region's rows (from y0), W apart
+RWByteAddressBuffer kind : register(u1, space1);   // a byte a pixel, rows (W + 3) / 4 words apart
 cbuffer k : register(b0, space2) { uint k_W; uint k_y0; uint k_rows; uint k_pad0; };
 // four pixels a thread (a word of kinds)
 [numthreads(8, 8, 1)]
@@ -225,18 +233,18 @@ void main(uint3 g : SV_DispatchThreadID)
 		const uint x = g.x * 4u + i;
 		if (x >= k_W) break;
 		const uint at = (g.y + k_y0) * k_W + x;
-		const uint o = owner[at], s = shade[at];
+		const uint o = LD(owner, at), s = LD(shade, at);
 		if (!o && s == 0xffffffffu) continue;
 		uint c, kd;
-		if (s == 0xffffffffu) { c = polys[o - 1u].colour; kd = 1u; }
+		if (s == 0xffffffffu) { c = polys.Load<poly>((o - 1u) * sizeof(poly)).colour; kd = 1u; }
 		else {
-			const uint h = (polys[s].colour >> 1) & 0x7f7f7fu;
-			if (o) { const uint b = polys[o - 1u].colour; c = MOIRE_MARK | (((b >> 1) & 0x7f7f7fu) + h); kd = 1u; }
+			const uint h = (polys.Load<poly>((s) * sizeof(poly)).colour >> 1) & 0x7f7f7fu;
+			if (o) { const uint b = polys.Load<poly>((o - 1u) * sizeof(poly)).colour; c = MOIRE_MARK | (((b >> 1) & 0x7f7f7fu) + h); kd = 1u; }
 			else { c = h; kd = 2u; }   // (over the picture beneath: the CPU's)
 		}
-		res[g.y * k_W + x] = c;
+		ST(res, g.y * k_W + x, c);
 		kw |= kd << (8u * i);
 	}
-	kind[g.y * words + g.x] = kw;
+	ST(kind, g.y * words + g.x, kw);
 }
 #endif

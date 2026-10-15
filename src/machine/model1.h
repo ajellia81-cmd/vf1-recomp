@@ -91,6 +91,30 @@ public:
 	// The ring's width (1200-1500) whatever the difficulty, or 0 for the arcade's (by difficulty,
 	// which the test mode shows as STAGE WIDTH). From the next match; false if the table isn't VF's.
 	bool set_ring_width(int width);
+	// The unused characters left in the game (TCRF: Jeff, Majido, Takeru, the Koskol brothers)
+	// play in Akira's place: his entries in the character tables point at theirs. 0 is Akira; the
+	// rest are UNUSED_CHARACTERS. Read as a fight loads, so a change wants a restart.
+	static constexpr const char *UNUSED_CHARACTERS[] = { "Akira", "Siba (Majido)", "Jeff", "Takeru (early Akira)",
+														 "Rekka (Koskol brother)", "Score (Koskol brother)", "Aeon (Koskol brother)", "Dural" };
+	void set_akira_slot(int which);
+	void akira_slot_heads(uint32_t record);   // (set_akira_slot: a select portrait for a head without one)
+	// The select's icon for the character in Akira's place, in his icon's tiles (56 x 64 pixels,
+	// xRGB, 15 colours at most; nullptr: his own). Returns false for a picture it can't show.
+	bool set_akira_icon(const uint32_t *xrgb);
+	static const char *const SECRET_ICON_NAMES[];   // (by UNUSED_CHARACTERS: assets/icons/NAME.png, nullptr: none)
+	// Cheats, before each frame: energy kept full for the players in `infinite` (bit 0 player 1,
+	// bit 1 player 2), the rest left with 1 when `one_hit` (any hit a knockout), and the round's
+	// clock stopped when `no_time`.
+	void fight_cheats(int infinite, bool one_hit, bool no_time);
+	bool set_no_time_limit(bool on);   // (true: the game's code changed, to be recompiled)
+	bool m_clock_held = false;
+	struct secret_icon {
+		bool on = false, active = false;   // a picture set; in the tiles now
+		uint32_t at = 0;                   // where the icon's map is (tile RAM word)
+		std::vector<uint16_t> chars, pal, map;            // ours: the tiles, the colours, the map
+		std::vector<uint16_t> keep_chars, keep_pal, keep_map;   // VF's own, put back after
+	} m_icon;
+	void secret_icon_frame();
 	// Replaces n bytes of the main CPU program, if their CRC-32 is `crc` (guards against other sets).
 	bool patch_program(uint32_t addr, size_t n, uint32_t crc, const uint8_t *to);
 	// Blanks the FREE PLAY notices (the attract/title one and the fight's): for the PC build,
@@ -931,14 +955,39 @@ public:
 	// every 60 with a fight's polygons): a difference is a failure (m_g3.failed: the CPU's then).
 	// (last: the members before it where they were)
 	int m_gpu3d_verify = 0;
-	// How many differing pixels are rounding, not a broken GPU (some graphics cards' drivers,
-	// NVIDIA's on Direct3D 12, put a handful of pixels a hair off): the GPU kept up to
-	// GPU_ROUNDING_PX, or 0.01% of the picture if more; when the player chose the GPU (not Auto,
-	// m_gpu3d_chosen), up to 1%: only a picture mostly wrong puts the 3D on the CPU.
+	// When the GPU's picture differs from the CPU's, how wrong it is, not how many pixels: some
+	// graphics cards' drivers (NVIDIA's on Direct3D 12) put pixels a hair off. Colours within
+	// GPU_ROUNDING_COLOUR anywhere are rounding; past that, up to 1% of the pixels, and up to 5%
+	// drawn on one and not the other (edges a hair apart), the GPU kept. When the player chose the
+	// GPU (not Auto, m_gpu3d_chosen): 10% and 25%, only a picture mostly wrong (a GPU drawing
+	// nothing, or garbage) putting the 3D on the CPU.
 	static constexpr long long GPU_ROUNDING_PX = 64;
-	static constexpr double GPU_ROUNDING_SHARE = 0.0001, GPU_ROUNDING_CHOSEN = 0.01;
+	static constexpr int GPU_ROUNDING_COLOUR = 8;
+	static constexpr double GPU_WRONG_COLOUR = 0.01, GPU_WRONG_COVER = 0.05, GPU_WRONG_COLOUR_CHOSEN = 0.10, GPU_WRONG_COVER_CHOSEN = 0.25;
 	bool m_gpu3d_chosen = false;
-	long long gpu_rounding_ok(long long px) const { return std::max(GPU_ROUNDING_PX, (long long)(px * (m_gpu3d_chosen ? GPU_ROUNDING_CHOSEN : GPU_ROUNDING_SHARE))); }
+	struct gpu_diff { long long all = 0, cover = 0, big = 0; int most = 0; size_t first = 0; };
+	static gpu_diff gpu_compare(const uint32_t *cpu, const uint32_t *gpu, size_t n)
+	{
+		gpu_diff d;
+		for (size_t i = 0; i < n; i++) {
+			const uint32_t a = cpu[i], g = gpu[i];
+			if (a == g) continue;
+			if (!d.all++) d.first = i;
+			if ((a ^ g) >> 24 || !(a & 0xffffff) != !(g & 0xffffff)) { d.cover++; continue; }   // (drawn on one only, or marked apart)
+			int off = 0;
+			for (int sh = 0; sh < 24; sh += 8) off = std::max(off, std::abs(int((a >> sh) & 255) - int((g >> sh) & 255)));
+			d.most = std::max(d.most, off);
+			if (off > GPU_ROUNDING_COLOUR) d.big++;
+		}
+		return d;
+	}
+	bool gpu_diff_ok(const gpu_diff &d, long long px) const
+	{
+		const long long colour = std::max(GPU_ROUNDING_PX, (long long)(px * (m_gpu3d_chosen ? GPU_WRONG_COLOUR_CHOSEN : GPU_WRONG_COLOUR)));
+		const long long cover = std::max(GPU_ROUNDING_PX, (long long)(px * (m_gpu3d_chosen ? GPU_WRONG_COVER_CHOSEN : GPU_WRONG_COVER)));
+		return d.big <= colour && d.cover <= cover;
+	}
+	gpu_diff m_bench_diff;   // (bench3d's picture each way, compared)
 	// tests: VF_GPU3D_TEST_DIFF=n, a check's picture counted n pixels more apart (-1: all of them)
 	static long long gpu_test_diff(long long d, long long px) { const char *t = getenv("VF_GPU3D_TEST_DIFF"); if (!t) return d; const long long k = atoll(t); return k < 0 ? px : std::min(px, d + k); }
 };

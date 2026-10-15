@@ -69,7 +69,8 @@ const key_bind SYS_KEYS[] = {
 //   d-pad / left stick: move     X guard   A punch   B kick
 //   Y guard+punch (throws)   RB punch+kick   LB guard+kick   RT guard+punch+kick
 //   Start: starts (with --arcade: only with a credit, as the cabinet's start button)
-//   View tapped: the menu (with --arcade: a coin; the menu is View held + Start)   View + LB: render scale   View + RB: picture shape
+//   Menu (View tapped, remappable), L3 + R3 or the touchpad click: the menu   View + Start: the menu too
+//   View + LB: render scale   View + RB: picture shape   (View is a coin instead only when it's set as Coin)
 // The PC build (the default; --arcade for the cabinet's behaviour): no boot screen, always free
 // play with nothing said about it, and Start simply starts.
 bool g_pc_mode = true;
@@ -77,6 +78,7 @@ bool g_pc_mode = true;
 struct pad_state
 {
 	bool back_was = false, back_combo = false, start_was = false;
+	bool menu_was = false, touch_was = false, sticks_was = false;   // the menu's other buttons (edges)
 	int coin_frames = 0, start_delay = -1, start_frames = 0;
 };
 
@@ -191,12 +193,16 @@ hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const playe
 		if (ks[k.key]) in[k.port] |= k.bit;
 	auto key = [&](SDL_Scancode k) { return k != SDL_SCANCODE_UNKNOWN && ks[k]; };
 	hotkey hk = hotkey::none;
-	static bool key_start_was[2], key_coin_was[2], pad_coin_was[2];
+	static bool key_start_was[2], key_coin_was[2], pad_coin_was[2], key_menu_was[2];
 	for (int p = 0; p < 2; p++) {
 		pad_state &st = ps[p];
 		// Start is the cabinet's start button: in Arcade mode it starts only with a credit (coins
-		// come from the Coin binding, the 5 and 6 keys, or View tapped on a pad)
+		// come from the Coin binding or the 5 and 6 keys)
 		auto press_start = [&] { st.start_delay = 0; };
+		// a key set as Menu opens it too (Esc always does)
+		const bool kmenu = key(ctl[p].key[C_MENU]);
+		if (kmenu && !key_menu_was[p]) hk = hotkey::menu;
+		key_menu_was[p] = kmenu;
 		for (int a = 0; a < C_START; a++)
 			if (key(ctl[p].key[a])) in[1 + p] |= BITS[a];
 		const bool kstart = key(ctl[p].key[C_START]);
@@ -216,9 +222,24 @@ hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const playe
 			const int dead = 12000;
 			const bool back = btn(SDL_GAMEPAD_BUTTON_BACK);
 			const bool start = player_controls::pad_down(g, ctl[p].pad[C_START]);
-			const bool pcoin = player_controls::pad_down(g, ctl[p].pad[C_COIN]);
+			// Coin and Menu on View are its tap (below), so View + LB and the like stay hotkeys
+			const int coin_code = ctl[p].pad[C_COIN], menu_code = ctl[p].pad[C_MENU];
+			const bool pcoin = coin_code != SDL_GAMEPAD_BUTTON_BACK && player_controls::pad_down(g, coin_code);
 			if (pcoin && !pad_coin_was[p] && !g_pc_mode) st.coin_frames = 6;
 			pad_coin_was[p] = pcoin;
+			const bool pmenu = menu_code != SDL_GAMEPAD_BUTTON_BACK && player_controls::pad_down(g, menu_code);
+			if (pmenu && !st.menu_was && !back) hk = hotkey::menu;   // (View held: LB and RB are its hotkeys)
+			st.menu_was = pmenu;
+			// L3 + R3 and the touchpad click (a PlayStation pad's) always open the menu as well, so a
+			// pad without a View button, or with Menu moved, can't be locked out of it
+			const bool sticks = btn(SDL_GAMEPAD_BUTTON_LEFT_STICK) && btn(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+			if (sticks && !st.sticks_was) hk = hotkey::menu;
+			st.sticks_was = sticks;
+			bool touch_bound = false;
+			for (int a = C_GUARD; a < C_COUNT; a++) touch_bound |= ctl[p].pad[a] == SDL_GAMEPAD_BUTTON_TOUCHPAD;
+			const bool touch = !touch_bound && btn(SDL_GAMEPAD_BUTTON_TOUCHPAD);
+			if (touch && !st.touch_was) hk = hotkey::menu;
+			st.touch_was = touch;
 			if (btn(SDL_GAMEPAD_BUTTON_DPAD_UP) || ly < -dead) b |= PL_UP;
 			if (btn(SDL_GAMEPAD_BUTTON_DPAD_DOWN) || ly > dead) b |= PL_DOWN;
 			if (btn(SDL_GAMEPAD_BUTTON_DPAD_LEFT) || lx < -dead) b |= PL_LEFT;
@@ -237,10 +258,10 @@ hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const playe
 					if (player_controls::pad_down(g, ctl[p].pad[a])) b |= BITS[a];
 				if (start && !st.start_was) press_start();
 			}
-			// View tapped on its own: the menu (with --arcade: a coin)
+			// View tapped on its own: whichever of Menu and Coin it's set as
 			if (!back && st.back_was && !st.back_combo) {
-				if (g_pc_mode) hk = hotkey::menu;
-				else st.coin_frames = 6;
+				if (menu_code == SDL_GAMEPAD_BUTTON_BACK) hk = hotkey::menu;
+				else if (coin_code == SDL_GAMEPAD_BUTTON_BACK && !g_pc_mode) st.coin_frames = 6;
 			}
 			if (!back) st.back_combo = false;
 			st.back_was = back;
@@ -328,6 +349,11 @@ struct settings
 {
 	int scale = 2, aspect = 0, volume = 100, music = 100, effects = 100, aa = 1, filter = 0, ring = 0;
 	int renderer3d = 2;     // the 3D's renderer: 0 the CPU, 1 the GPU, 2 Auto (whichever is quicker here)
+	int akira_slot = 0;     // Cheats: who plays in Akira's place (model1::UNUSED_CHARACTERS; 0 Akira)
+	int infinite_energy = 0;   // Cheats: bit 0 player 1, bit 1 player 2
+	bool one_hit_ko = false, no_time_limit = false;   // Cheats
+	int ring_cheat = 0;     // Cheats: 0 the arcade's, 1 tiny (600), 2 huge (5000: no ring outs)
+	int ring_now() const { return ring_cheat == 1 ? 600 : ring_cheat == 2 ? 5000 : ring; }
 	std::string auto_3d;    // Auto's findings, per render scale and antialiasing ("3x1:g,2x0:c")
 	int arcade_coin = -1;   // Arcade mode's coin/credit setting, kept while PC mode makes it free play (-1: not seen yet)
 	std::string roms_folder;   // where the player keeps vf.zip (roms_folder = ...; read before the game starts, kept as written)
@@ -364,9 +390,23 @@ struct settings
 		flag("show_fps", show_fps);
 		num("arcade_coins", arcade_coin, -1, 0xffff);
 		num("renderer_3d", renderer3d, 0, 2);
+		num("akira_slot", akira_slot, 0, int(std::size(model1::UNUSED_CHARACTERS)) - 1);
+		num("infinite_energy", infinite_energy, 0, 3);
+		flag("one_hit_ko", one_hit_ko);
+		flag("no_time_limit", no_time_limit);
+		num("ring_cheat", ring_cheat, 0, 2);
 		if (auto it = kv.find("auto_3d"); it != kv.end()) auto_3d = it->second;
 		if (auto it = kv.find("roms_folder"); it != kv.end()) roms_folder = it->second;
 		for (int p = 0; p < 2; p++) ctl[p].load(kv, p);
+		// settings from before the Menu button: Arcade mode's View tapped was a coin. It stays one
+		// (as Coin, so the menu is L3 + R3, the touchpad, View + Start or Esc), so a cabinet's coin
+		// button keeps working after the update
+		if (arcade && !kv.count("p1_pad_menu"))
+			for (auto &c : ctl)
+				if (c.pad[C_COIN] == PAD_NONE && c.pad[C_MENU] == SDL_GAMEPAD_BUTTON_BACK) {
+					c.pad[C_COIN] = SDL_GAMEPAD_BUTTON_BACK;
+					c.pad[C_MENU] = PAD_NONE;
+				}
 	}
 
 	void save(const std::string &path) const
@@ -380,6 +420,11 @@ struct settings
 				int(fullscreen), int(timings), volume, int(arcade), int(smooth_bg), music, effects, aa, int(show_fps), filter, ring);
 		if (arcade_coin >= 0) fprintf(f, "arcade_coins = %d\n", arcade_coin);
 		fprintf(f, "renderer_3d = %d\n", renderer3d);
+		if (akira_slot) fprintf(f, "akira_slot = %d\n", akira_slot);
+		if (infinite_energy) fprintf(f, "infinite_energy = %d\n", infinite_energy);
+		if (one_hit_ko) fprintf(f, "one_hit_ko = 1\n");
+		if (no_time_limit) fprintf(f, "no_time_limit = 1\n");
+		if (ring_cheat) fprintf(f, "ring_cheat = %d\n", ring_cheat);
 		if (!auto_3d.empty()) fprintf(f, "auto_3d = %s\n", auto_3d.c_str());
 		if (!roms_folder.empty()) fprintf(f, "roms_folder = %s\n", roms_folder.c_str());
 		for (int p = 0; p < 2; p++) ctl[p].save(f, p);
@@ -653,6 +698,9 @@ int main(int argc, char **argv)
 				freopen((dir + "/log.txt").c_str(), "w", stderr);
 				setvbuf(stderr, nullptr, _IONBF, 0);
 			}
+			// the log's first line: which build (as the menu's footer), and where it runs
+			fprintf(stderr, "Virtua Fighter Recomp %s (%s) on %s, %d logical processors, %d MB of memory\n", VF_VERSION, *VF_DATE ? VF_DATE : "no date",
+					SDL_GetPlatform(), SDL_GetNumLogicalCPUCores(), SDL_GetSystemRAM());
 			if (portable) fprintf(stderr, "portable (%s beside the program): everything in %s\n", portable, dir.c_str());
 			else if (home.find("/AppTranslocation/") != std::string::npos)   // (macOS runs a downloaded app from a hidden copy until it's moved)
 				fprintf(stderr, "run from macOS's hidden copy of the app (App Translocation): a portable.txt beside it isn't seen until the app is moved with the Finder\n");
@@ -717,19 +765,24 @@ int main(int argc, char **argv)
 	};
 	uint64_t saved_hash = backup_hash();
 	if (!interp) m.run_cpu = [](int n) { rec::run(n); };
+	m.set_no_time_limit(cfg.no_time_limit);   // (Cheats: an instruction of the game's, so before it's recompiled)
 #ifdef VF_NATIVE
 	// The game's code, recompiled to native code from this ROM, now (tens of milliseconds); the
 	// address map says where the code is. Without it the game runs on the interpreter.
-	if (!interp) {
-		rec::attach(m.cpu());
+	auto recompile = [&] {
 		rec::hints map;
 		std::vector<uint8_t> mem = m.maincpu_rom();
 		mem.resize(0x2000000);
 		rec::native_stats st;
-		if (map.read(find_assets() + "/vf_map.txt") && rec::build_native(mem, map, &st))
+		const bool ok = map.read(find_assets() + "/vf_map.txt") && rec::build_native(mem, map, &st);
+		if (ok)
 			fprintf(stderr, "recompiled %zu functions (%zu instructions) to %zu KB of native code in %.0f ms\n",
 					st.functions, st.instructions, st.code_bytes / 1024, st.ms);
-		else {
+		return ok;
+	};
+	if (!interp) {
+		rec::attach(m.cpu());
+		if (!recompile()) {
 			// Still playable, just slower: say so (the log is the only console a packaged build has).
 			const std::string why = "Couldn't recompile the game (" + find_assets() + "/vf_map.txt missing or unusable, "
 									"or no executable memory): running it on the slower interpreter instead.";
@@ -757,7 +810,10 @@ int main(int argc, char **argv)
 	};
 	load_backgrounds(m, find_assets() + "/backgrounds");   // the title and select's widescreen sides
 	load_backgrounds(m, dir + "/backgrounds");   // the player's own (hi-res stage skies...), which win
-	m.set_ring_width(cfg.ring);
+	m.set_ring_width(cfg.ring_now());
+	m.set_akira_slot(cfg.akira_slot);
+	auto icon_dirs = [&] { return std::vector<std::string>{ dir + "/icons", find_assets() + "/icons" }; };   // (the player's first)
+	load_secret_icon(m, cfg.akira_slot, icon_dirs());
 	// The play style's coins: PC mode is free play (its FREE PLAY text hidden); Arcade mode has the
 	// cabinet's own coin setting, kept in settings.ini while PC mode has free play in its place (it
 	// was left at free play, so Arcade mode after PC mode had no credits to put in, and a cabinet's
@@ -1005,20 +1061,37 @@ int main(int argc, char **argv)
 		}
 #if VF_GPU3D_SDL
 		// (SDL_GPU: its picture of the test scene checked against the CPU's before it's used)
-		if (cfg.renderer3d != 0 && !a3.tested) {
+		// (Direct3D 12's test failing, Vulkan's tried at once: SDL_GPU's other on Windows, where some
+		// older cards draw nothing on one and are fine on the other (vf2-recomp #3: a GTX 970); the
+		// 3D has a device of its own, so the screen's renderer is untouched. SDL_GPU_DRIVER, SDL's
+		// own, chooses over this.)
+		for (int attempt = 0; cfg.renderer3d != 0 && !a3.tested; attempt++) {
 			a3.tested = true;
 			double c = 0, g = 0;
 			long long d = -1;
 			m.m_gpu3d_chosen = cfg.renderer3d == 1;
-			const long long px = (long long)m.frame_w() * m.frame_h(), ok = m.gpu_rounding_ok(px);
-			if (!m.bench3d(1, c, g, &d) || d < 0 || d > ok) {
+			const long long px = (long long)m.frame_w() * m.frame_h();
+			const auto &dd = m.m_bench_diff;
+			if (!m.bench3d(1, c, g, &d) || d < 0 || !m.gpu_diff_ok(dd, px)) {
+				if (d > 0) fprintf(stderr, "the 3D on the GPU (%s): its test picture isn't the CPU's (%lld of %lld pixels differ, %lld drawn on one only, %lld by more than %d)\n",
+								   g3->name(), d, px, dd.cover, dd.big, model1::GPU_ROUNDING_COLOUR);
+				else fprintf(stderr, "the 3D on the GPU (%s): its test picture failed\n", g3->name());
+				if (attempt == 0 && !strncmp(g3->name(), "direct3d12", 10) && !getenv("SDL_GPU_DRIVER")) {
+					m.set_gpu3d(nullptr);
+					g3.reset();
+					g3 = gpu3d_create_sdlgpu("vulkan");
+					fprintf(stderr, "the 3D on the GPU: trying Vulkan instead: %s\n", g3 ? g3->name() : "none here");
+					if (g3) { m.set_gpu3d(g3.get()); a3.tested = false; continue; }
+					a3.broken = true; a3.gpu = false; apply_3d();   // (g3 gone: the CPU's)
+					return;
+				}
 				a3.broken = true; a3.gpu = false; apply_3d();
-				if (d > 0) fprintf(stderr, "the 3D on the GPU: its test picture isn't the CPU's (%lld of %lld pixels differ, over the %lld kept): the CPU for this run\n", d, px, ok);
-				else fprintf(stderr, "the 3D on the GPU: its test picture failed: the CPU for this run\n");
+				fprintf(stderr, "the 3D on the GPU: the CPU for this run\n");
 				return;
 			}
-			if (d > 0) fprintf(stderr, "the 3D on the GPU: its test picture: %lld of %lld pixels differ by rounding (up to %lld kept): keeping the GPU\n", d, px, ok);
-			else fprintf(stderr, "the 3D on the GPU: its test picture is the CPU's, pixel for pixel\n");
+			if (d > 0) fprintf(stderr, "the 3D on the GPU (%s): its test picture: %lld of %lld pixels differ by rounding (%lld drawn on one only, %lld by more than %d, colours by %d at most): keeping the GPU\n",
+							   g3->name(), d, px, dd.cover, dd.big, model1::GPU_ROUNDING_COLOUR, dd.most);
+			else fprintf(stderr, "the 3D on the GPU (%s): its test picture is the CPU's, pixel for pixel\n", g3->name());
 		}
 #endif
 		if (cfg.renderer3d != 2) {
@@ -1321,7 +1394,7 @@ int main(int argc, char **argv)
 	// Reset (the menu, F3): the menu closes, a paused game unpauses, and the screen goes black at
 	// once while the boot runs unseen (a few seconds on a slow machine), not the last picture held.
 	// the arcade settings as their page opened (and the ring): see arcade_page
-	std::optional<std::array<int, 6>> assign_before;
+	std::optional<std::array<int, 9>> assign_before;
 	auto reset_game = [&](bool keep_coins = true) {
 		assign_before.reset();   // a restart applies them
 		if (keep_coins) keep_arcade_coins();     // (Arcade: as the service menu may have left them)
@@ -1440,7 +1513,7 @@ int main(int argc, char **argv)
 	auto game_page = [&] {
 		menu_page p{ "Game", "", {} };
 		p.items.push_back({ "Play style",
-			"PC skips the boot screen and is always free play. Arcade has the boot screen, coins and credits, like the real cabinet: Start needs a credit, and Coin (or View tapped on a pad) adds one (its coin settings are kept for it). Changing it restarts the game.",
+			"PC skips the boot screen and is always free play. Arcade has the boot screen, coins and credits, like the real cabinet: Start needs a credit, and Coin adds one (set it in Controls: a key, or a pad button such as View; its coin settings are kept for it). Changing it restarts the game.",
 			[&] { return std::string(cfg.arcade ? "Arcade" : "PC"); },
 			[&](int) {
 				keep_arcade_coins();
@@ -1458,11 +1531,14 @@ int main(int argc, char **argv)
 	// so closing the menu after changing one restarts it (only if something is different) ----
 	using ga = model1::game_assignment;
 	constexpr int N_ASSIGN = 5;
-	static_assert(std::tuple_size_v<decltype(assign_before)::value_type> == N_ASSIGN + 1);
+	static_assert(std::tuple_size_v<decltype(assign_before)::value_type> == N_ASSIGN + 4);
 	auto assignments_now = [&] {
-		std::array<int, N_ASSIGN + 1> v;
+		std::array<int, N_ASSIGN + 4> v;
 		for (int i = 0; i < N_ASSIGN; i++) v[i] = m.assignment(ga(i));
 		v[N_ASSIGN] = cfg.ring;
+		v[N_ASSIGN + 1] = cfg.akira_slot;   // (Cheats: read as a fight loads, so it restarts too)
+		v[N_ASSIGN + 2] = cfg.ring_cheat;
+		v[N_ASSIGN + 3] = cfg.no_time_limit;   // (an instruction of the game's: a restart recompiles it)
 		return v;
 	};
 	auto arcade_page = [&] {
@@ -1485,7 +1561,7 @@ int main(int argc, char **argv)
 				int i = int(std::find(std::begin(RINGS), std::end(RINGS), cfg.ring) - std::begin(RINGS));
 				cfg.ring = RINGS[std::clamp(i + d, 0, int(std::size(RINGS)) - 1)];
 				cfg_dirty = true;
-				m.set_ring_width(cfg.ring);
+				m.set_ring_width(cfg.ring_now());
 			} });
 		choice("Rounds to win (vs CPU)", "Rounds needed to win a match against the computer.", ga::match_1p, [](int v) { return std::to_string(v); });
 		choice("Rounds to win (vs player)", "Rounds needed to win a match between two players.", ga::match_vs, [](int v) { return std::to_string(v); });
@@ -1494,6 +1570,38 @@ int main(int argc, char **argv)
 		p.items.push_back({ "Service menu",
 			"The arcade's own test menu: input and sound tests, coin settings and bookkeeping. Down moves, Start selects (or 9 and F2 on a keyboard). Choose EXIT to come back.",
 			{}, {}, [&] { menu.close(); paused = false; g_test_pending = true; } });
+		p.items.push_back(back_item());
+		return p;
+	};
+	// ---- cheats: the unused characters (in Akira's place) ----
+	auto cheats_page = [&] {
+		if (!assign_before) assign_before = assignments_now();
+		menu_page p{ "Cheats: a change restarts the game when the menu closes", "", {} };
+		constexpr int N_CHARS = int(std::size(model1::UNUSED_CHARACTERS));
+		p.items.push_back({ "Secret character",
+			"A character cut from the game, in Akira's spot on the select screen (Akira is away while one is in). "
+			"Unfinished: borrowed moves, no throws. The Koskol brothers were to be the final bosses.",
+			[&] { return std::string(cfg.akira_slot ? model1::UNUSED_CHARACTERS[cfg.akira_slot] : "Off"); },
+			[&](int d) {
+				cfg.akira_slot = wrap(cfg.akira_slot + d, N_CHARS);
+				cfg_dirty = true;
+				m.set_akira_slot(cfg.akira_slot);
+				load_secret_icon(m, cfg.akira_slot, icon_dirs());
+			} });
+		static const char *WHO[] = { "Off", "Player 1", "Player 2", "Both" };
+		p.items.push_back({ "Infinite energy", "Energy stays full: hits land but never knock out.",
+			[&] { return std::string(WHO[cfg.infinite_energy]); },
+			[&](int d) { cfg.infinite_energy = wrap(cfg.infinite_energy + d, 4); cfg_dirty = true; } });
+		p.items.push_back({ "One-hit KO", "Every fighter (but one with infinite energy) is down to their last bit of energy: any hit wins the round.",
+			[&] { return on_off(cfg.one_hit_ko); },
+			[&](int) { cfg.one_hit_ko = !cfg.one_hit_ko; cfg_dirty = true; } });
+		p.items.push_back({ "No time limit", "The round's clock stays at its start and never runs out: a round ends by knockout or ring out.",
+			[&] { return on_off(cfg.no_time_limit); },
+			[&](int) { cfg.no_time_limit = !cfg.no_time_limit; cfg_dirty = true; } });
+		static const char *RING[] = { "Normal", "Tiny", "Huge" };
+		p.items.push_back({ "Ring", "Tiny is half the smallest ring: ring outs everywhere. Huge is far wider than the stage: no ring outs.",
+			[&] { return std::string(RING[cfg.ring_cheat]); },
+			[&](int d) { cfg.ring_cheat = wrap(cfg.ring_cheat + d, 3); cfg_dirty = true; m.set_ring_width(cfg.ring_now()); } });
 		p.items.push_back(back_item());
 		return p;
 	};
@@ -1527,9 +1635,9 @@ int main(int argc, char **argv)
 	auto keys_page = [&](int p) {
 		menu_page pg{ p ? "Player 2 keyboard" : "Player 1 keyboard", "", {} };
 		for (int a = 0; a < C_COUNT; a++)
-			pg.items.push_back({ CONTROL_NAMES[a], a == C_COIN
-					? "A coin for this player in Arcade mode (a cabinet's coin slot). Select, then press the key to use. Delete clears it."
-					: "Select, then press the key to use. Delete clears it.",
+			pg.items.push_back({ CONTROL_NAMES[a], std::string(a == C_COIN ? "A coin for this player in Arcade mode (a cabinet's coin slot). "
+													: a == C_MENU ? "Opens this menu (as Esc always does): for a cabinet's button. " : "") +
+					"Select, then press the key to use. Delete clears it.",
 				[&, p, a] { return key_name(cfg.ctl[p].key[a]); }, {},
 				[&, p, a] {
 					menu.capture(std::string("Press a key for ") + CONTROL_NAMES[a] + (p ? " (player 2)" : " (player 1)") +
@@ -1556,13 +1664,14 @@ int main(int argc, char **argv)
 	auto pad_buttons_page = [&](int p) {
 		menu_page pg{ p ? "Player 2 pad buttons" : "Player 1 pad buttons", "", {} };
 		for (int a = C_GUARD; a < C_COUNT; a++)
-			pg.items.push_back({ CONTROL_NAMES[a], std::string(a == C_COIN ? "A coin for this player in Arcade mode (a cabinet's coin slot). " : "") +
+			pg.items.push_back({ CONTROL_NAMES[a], std::string(a == C_COIN ? "A coin for this player in Arcade mode (a cabinet's coin slot). "
+												   : a == C_MENU ? "Opens this menu. L3 + R3 and the touchpad click (when it isn't set to something else) always do too, and Esc on a keyboard. " : "") +
 												   "Select, then press the button (or trigger) to use. Y (or Delete) clears it. "
 												   "The d-pad and left stick always move.",
 				[&, p, a] { return player_controls::pad_label(cfg.ctl[p].pad[a]); }, {},
 				[&, p, a] {
 					menu.capture(std::string("Press a pad button for ") + CONTROL_NAMES[a] + (p ? " (player 2)" : " (player 1)") +
-								 ". View or Esc keeps it; Delete clears it.",
+								 (a >= C_COIN ? ". Esc keeps it; Delete clears it." : ". View or Esc keeps it; Delete clears it."),
 						[&, p, a](const SDL_Event &e) {
 							int code = PAD_NONE;
 							if (e.type == SDL_EVENT_KEY_DOWN) {
@@ -1572,7 +1681,8 @@ int main(int argc, char **argv)
 								return true;
 							}
 							if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
-								if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) return true;     // View: keep it
+								// View: keep it (View is for the menu's hotkeys, not moves), unless it's for Coin or Menu
+								if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK && a < C_COIN) return true;
 								code = e.gbutton.button;
 							} else if (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION && e.gaxis.value > 16000 &&
 									   (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))
@@ -1592,7 +1702,7 @@ int main(int argc, char **argv)
 		pg.items.push_back({ "Pad", "Which controller this player uses: any free one, a particular one, or none.",
 							 [&, p] { return pad_name(p); }, [&, p](int d) { cycle_pad(p, d); } });
 		pg.items.push_back({ "Keyboard", "Change this player's keys.", {}, {}, [&, p] { menu.push(keys_page(p)); } });
-		pg.items.push_back({ "Pad buttons", "Change which buttons guard, punch, kick, do the combinations and start.",
+		pg.items.push_back({ "Pad buttons", "Change which buttons guard, punch, kick, do the combinations, start, add a coin and open the menu.",
 							 {}, {}, [&, p] { menu.push(pad_buttons_page(p)); } });
 		pg.items.push_back({ "Reset to defaults", "Put this player's keys and buttons back as they were.", {}, {},
 							 [&, p] {
@@ -1639,6 +1749,8 @@ int main(int argc, char **argv)
 		p.items.push_back({ "Arcade settings", "Difficulty, ring size, rounds, continues and the service menu. Changing them restarts the game.", {}, {},
 							[&] { menu.push(arcade_page()); } });
 		p.items.push_back({ "Controls", "Each player's controller, keys and buttons.", {}, {}, [&] { menu.push(controls_page()); } });
+		p.items.push_back({ "Cheats", "Play as the characters left unused in the game. Changing it restarts the game.", {}, {},
+							[&] { menu.push(cheats_page()); } });
 		p.items.push_back({ "Quit", "Saves and closes the game.", {}, {}, [&] { running = false; } });
 		return p;
 	};
@@ -1789,12 +1901,22 @@ int main(int argc, char **argv)
 			if (assign_before) {
 				const bool changed = *assign_before != assignments_now();
 				assign_before.reset();
-				if (changed) reset_game();
+				if (changed) {
+					// (the game's code is then new: recompiled before the reset, which leaves the old behind)
+					const bool code = m.set_no_time_limit(cfg.no_time_limit);
+#ifdef VF_NATIVE
+					if (code && !interp) recompile();
+#else
+					(void)code;
+#endif
+					reset_game();
+				}
 			}
 			pstate[0] = pstate[1] = pad_state{};   // the button that closed it isn't a move
 			pstate[0].back_was = pstate[1].back_was = true;
 			pstate[0].back_combo = pstate[1].back_combo = true;
 			pstate[0].start_was = pstate[1].start_was = true;
+			for (pad_state &s : pstate) s.menu_was = s.touch_was = s.sticks_was = true;
 		}
 		if (paused || menu.is_open()) restart_clock();   // (no catching up afterwards)
 		if (!paused && !menu.is_open()) {
@@ -1856,6 +1978,7 @@ int main(int argc, char **argv)
 				case hotkey::none: break;
 				}
 				if (menu.is_open()) break;
+				if (cfg.infinite_energy || cfg.one_hit_ko || cfg.no_time_limit) m.fight_cheats(cfg.infinite_energy, cfg.one_hit_ko, cfg.no_time_limit);
 				m.run_frame();
 				game_run++;
 				// leaving the service menu: the PC build restarts at once, past the boot screen
