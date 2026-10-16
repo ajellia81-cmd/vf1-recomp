@@ -352,6 +352,21 @@ int model1::repair_by_camera(const logic_frame &a, const logic_frame &b, std::ve
 		const double med = sorted[sorted.size() / 2];
 		for (size_t i = 0; i < P.size(); i++) use[i] = res[i] <= std::max(3 * med, 0.002);
 	}
+	// A cut the parts' moves miss: the camera's own move in a frame, a turn of over 15 degrees or a
+	// shift of over 8.5% of the scenery's depth (a game's fastest swing, a knockdown's, turns it 11
+	// degrees and shifts it 7.7%). The parts mostly stay close (a cut to the same fighters from
+	// another side: TIME OVER's far view to the one from above), and blending them drew views
+	// between the two that the game never showed.
+	{
+		const double tr = std::clamp((R[0][0] + R[1][1] + R[2][2] - 1) / 2, -1.0, 1.0);
+		double mv = 0, dp = 0;
+		for (size_t i = 0; i < P.size(); i++)
+			if (use[i]) {
+				mv += std::sqrt((Q[i].x - P[i].x) * (Q[i].x - P[i].x) + (Q[i].y - P[i].y) * (Q[i].y - P[i].y) + (Q[i].z - P[i].z) * (Q[i].z - P[i].z));
+				dp += std::max(std::fabs(P[i].z), 1.0);
+			}
+		m_camera_cut = std::acos(tr) > 15 * M_PI / 180 || (dp > 0 && mv > 0.085 * dp);
+	}
 	int repaired = 0;
 	for (size_t i = 0; i < P.size(); i++) {
 		const int k = K[i];
@@ -438,6 +453,7 @@ void model1::blend_slots(const logic_frame &a, const logic_frame &b, double alph
 		else if (b_skip) j += kb;                            // slots that are new
 		else pair[j++] = int(i++);                           // the same place, a different model
 	}
+	m_camera_cut = false;
 	repaired += repair_by_camera(a, b, pair, changed_run);
 	static const bool logp = getenv("VF_LOG_SMOOTH") != nullptr;
 	if (logp && repaired && !m_redrawing) fprintf(stderr, "P frame %d repaired %d\n", b.frame, repaired);
@@ -467,9 +483,31 @@ void model1::blend_slots(const logic_frame &a, const logic_frame &b, double alph
 		m_blend_light[i] = { sa.light[0], sa.light[1], sa.light[2], sa.has_light ? 1.0f : 0.0f };
 		m_blend_ok[i] = 1;
 	}
-	// A camera cut moves nearly every part at once (fast moves only a few): then, or when a part
-	// can't be paired (it would come apart from the blended ones), the newer frame is shown whole.
-	m_blend_cut = jumps * 2 > paired || missing > 0;
+	// A camera cut moves nearly every part at once (fast moves only a few): then, or when many
+	// parts can't be paired (another scene), the newer frame is shown whole. A few new parts (a
+	// hat knocked off, Jeff's cap and shades) are drawn where the newer frame has them, the rest
+	// blended: as a cut, the picture carried on past the newer list, and the fighters' fast-turning
+	// limbs came out stretched (a kick that knocked Pai's hat off), or, made rigid, apart.
+	m_blend_cut = jumps * 2 > paired || missing * 8 > paired || m_camera_cut;
+	// Carried on past the newer list (blend_slots(older, newer, 1 to 1.5) at a cut, half a game frame
+	// on at most): each part's own blend carried on grew the fast-turning ones (a kicking leg up to
+	// twice its length) and moved each by itself, apart from the next (made rigid, a hand came off
+	// its wrist). Every part is drawn as the newer list has it, all moved on together by the parts'
+	// average move between the two lists: the whole picture carries on, nothing comes apart. Only
+	// when nothing moved fast: a camera swinging into a cut (TIME OVER's), a body mid-throw or a
+	// kicking leg carried on into views and poses the game never showed, so then the newer list
+	// is held as it is until the cut.
+	if (alpha > 1 && !m_blend_cut) {
+		double mv[3] = {};
+		int n = 0;
+		for (size_t i = 0; i < b.slots.size() && !jumps; i++)
+			if (m_blend_ok[i]) { for (int k = 0; k < 3; k++) mv[k] += m_blend_to[i][9 + k] - m_blend_from[i][9 + k]; n++; }
+		for (size_t i = 0; i < b.slots.size(); i++)
+			if (m_blend_ok[i]) {
+				memcpy(m_blend[i].data(), m_blend_to[i].data(), 12 * sizeof(float));
+				for (int k = 0; k < 3; k++) m_blend[i][9 + k] += float((alpha - 1) * mv[k] / std::max(n, 1));
+			}
+	}
 	if (m_blend_cut) std::fill(m_blend_ok.begin(), m_blend_ok.end(), 0);
 	m_smooth_stats[1] = jumps;
 	static const bool logm = getenv("VF_LOG_SMOOTH") != nullptr;

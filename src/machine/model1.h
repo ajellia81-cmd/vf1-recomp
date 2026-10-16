@@ -352,6 +352,7 @@ private:
 	void sky_scroll_written(uint32_t a);
 	void blend_slots(const logic_frame &a, const logic_frame &b, double alpha);
 	int repair_by_camera(const logic_frame &a, const logic_frame &b, std::vector<int> &pair, const std::vector<char> &changed_run);
+	bool m_camera_cut = false;    // (repair_by_camera: the camera's move between the two lists is a cut)
 	void index_objects(logic_frame &lf);
 	void record_frame();
 	bool smooth_matrix(uint32_t poly_adr, float *out);

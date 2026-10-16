@@ -595,15 +595,31 @@ std::string program_folder()
 	}
 	return b;
 }
-// Portable mode, as the player asks for it: a file named portable.txt beside the program (its name
-// as found, else null). Any contents; "portable" and Windows' portable.txt.txt (a New Text Document
+// Portable mode, as the player asks for it: a file named portable.txt beside the program, or in the
+// folder above it (its name as found, else null). Any contents; "portable" and Windows' portable.txt.txt (a New Text Document
 // renamed with its extension hidden) count too.
 const char *portable_marker(const std::string &folder)
 {
 	if (folder.empty()) return nullptr;
-	std::error_code ec;
-	for (const char *name : { "portable.txt", "portable", "portable.txt.txt" })
-		if (std::filesystem::is_regular_file(folder + name, ec)) return name;
+	// beside the program, or the folder above it: the download unzips into a folder of its own,
+	// and a portable.txt put in the folder it was unzipped to ("the main folder") went unseen
+	// (2026-10-16, a player's report). Looked for with SDL (UTF-8 names, as on a drive whose
+	// folders have accents), not std::filesystem (Windows' code page there).
+	std::string up = folder;
+	while (!up.empty() && (up.back() == '/' || up.back() == '\\')) up.pop_back();
+	const size_t cut = up.find_last_of("/\\");
+	up = cut == std::string::npos ? std::string() : up.substr(0, cut + 1);
+	static const char *const NAMES[] = { "portable.txt", "portable", "portable.txt.txt" };
+	static const char *const BESIDE[] = { "portable.txt beside the program", "portable beside the program", "portable.txt.txt beside the program" };
+	static const char *const ABOVE[] = { "portable.txt in the folder above", "portable in the folder above", "portable.txt.txt in the folder above" };
+	for (int above = 0; above < 2; above++) {
+		const std::string &dir = above ? up : folder;
+		if (dir.empty()) continue;
+		for (int k = 0; k < 3; k++) {
+			SDL_PathInfo info;
+			if (SDL_GetPathInfo((dir + NAMES[k]).c_str(), &info) && info.type == SDL_PATHTYPE_FILE) return above ? ABOVE[k] : BESIDE[k];
+		}
+	}
 	return nullptr;
 }
 
@@ -701,7 +717,7 @@ int main(int argc, char **argv)
 			// the log's first line: which build (as the menu's footer), and where it runs
 			fprintf(stderr, "Virtua Fighter Recomp %s (%s) on %s, %d logical processors, %d MB of memory\n", VF_VERSION, *VF_DATE ? VF_DATE : "no date",
 					SDL_GetPlatform(), SDL_GetNumLogicalCPUCores(), SDL_GetSystemRAM());
-			if (portable) fprintf(stderr, "portable (%s beside the program): everything in %s\n", portable, dir.c_str());
+			if (portable) fprintf(stderr, "portable (%s): everything in %s\n", portable, dir.c_str());
 			else if (home.find("/AppTranslocation/") != std::string::npos)   // (macOS runs a downloaded app from a hidden copy until it's moved)
 				fprintf(stderr, "run from macOS's hidden copy of the app (App Translocation): a portable.txt beside it isn't seen until the app is moved with the Finder\n");
 			// the player's ROM folder: the command line's, else VF_ROMS, else settings.ini's
