@@ -15,7 +15,7 @@ recompiled to native code, with render scales up to 6x, widescreen and smooth mo
   <a href="https://vf1-recomp.pages.dev/">Play</a> ·
   <a href="https://github.com/mr-finster/vf1-recomp/releases/latest">Download</a> ·
   <a href="https://youtu.be/mHrTyikhkyg">Trailer</a> ·
-  <a href="https://youtu.be/PASTE_ID_HERE">Secret characters</a> ·
+  <a href="https://youtu.be/yranppHYl7A">Secret characters</a> ·
   <a href="#status">Status</a> ·
   <a href="#controls">Controls</a> ·
   <a href="https://github.com/mr-finster/vf1-recomp/issues">Report a bug</a>
@@ -27,7 +27,7 @@ recompiled to native code, with render scales up to 6x, widescreen and smooth mo
 
 <p align="center">
   <a href="https://youtu.be/mHrTyikhkyg"><img src="https://img.youtube.com/vi/mHrTyikhkyg/maxresdefault.jpg" alt="Watch the trailer" width="395"></a>
-  <a href="https://youtu.be/PASTE_ID_HERE"><img src="https://img.youtube.com/vi/PASTE_ID_HERE/maxresdefault.jpg" alt="Watch the secret characters trailer" width="395"></a>
+  <a href="https://youtu.be/yranppHYl7A"><img src="https://img.youtube.com/vi/yranppHYl7A/maxresdefault.jpg" alt="Watch the secret characters trailer" width="395"></a>
   <br><sub>Trailer · Secret characters (click to watch on YouTube)</sub>
 </p>
 
