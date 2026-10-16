@@ -593,6 +593,18 @@ void model1::set_akira_slot(int which)
 		else for (int b = 0; b < AT[i].size; b++) p[b] = uint8_t(TO[which][i] >> (8 * b));   // (little-endian)
 	}
 	akira_slot_heads(TO[which][MODEL1] < 0 ? 0 : 0xfd0000 | uint32_t(TO[which][MODEL1]));
+	// Dural is the game's own in Akira's place, not her record in Akira's slots: the fight looks a
+	// fighter up by slot (the select's character, 0-8, through fd2f1b for player 1 and fd2f24 for
+	// player 2: Akira's slots 0x16 and 0x0b, Dural's 5), and the game checks for her by slot, as
+	// for the metal clank of a hit on her (ffb8d8: 9e0f7f), which a record in Akira's slots never
+	// made. Akira's entry is her slot instead.
+	static const uint32_t SLOT_TABLES[2] = { 0xfd2f1b, 0xfd2f24 };
+	static const uint8_t AKIRA_SLOT[2] = { 0x16, 0x0b };
+	for (int t = 0; t < 2; t++) {
+		uint8_t *e = &rom[SLOT_TABLES[t]];
+		if (SLOT_TABLES[t] + 9 > rom.size() || e[8] != 5 || (e[0] != AKIRA_SLOT[t] && e[0] != 5)) continue;   // (not VF's)
+		e[0] = which == 7 ? 5 : AKIRA_SLOT[t];
+	}
 	// Siba's pounce (Up + Punch at a downed opponent): his moves table (fc78c4, his record's +4)
 	// has move 259 there, a placeholder's record (fc2722, five other moves': a jump with no jump in
 	// it), so the game planned a jump of 0 + 2 frames, the whole way in 2, and he flew on at that
