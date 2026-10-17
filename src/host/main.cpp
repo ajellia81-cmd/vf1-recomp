@@ -979,10 +979,25 @@ int main(int argc, char **argv)
 	// first few of the game's own pictures are checked too. log.txt says which it is.
 	gpu_compose gc;
 	bool gpu_2d = false;
-	// two pixels within 2 a channel (the GPU's blend against the CPU's rounding)
-	auto near = [](uint32_t a, uint32_t b) {
-		for (int k = 0; k < 24; k += 8) if (std::abs(int((a >> k) & 0xff) - int((b >> k) & 0xff)) > 2) return false;
-		return true;
+	// The GPU's picture against the CPU's, as vf2-recomp's check (its #3): judged by how wrong, not
+	// how many. Colours (never the unused top byte) off by a little anywhere are a driver's rounding
+	// (NVIDIA's on Direct3D 12 scales and blends a hair differently: vf1-recomp #16, an RTX 5080 at
+	// 6x and 16:9 sent to the CPU by its first picture, then held to 60 a second); only more than 1%
+	// of the picture off by more than 8 a channel is a GPU putting it together wrong.
+	struct picture_diff { long long n = 0, big = 0; int most = 0; bool wrong = false; };
+	auto compare = [](const std::vector<uint32_t> &g, const uint32_t *c, size_t px, bool loose) {
+		picture_diff d;
+		for (size_t i = 0; i < px; i++) {
+			if (!((g[i] ^ c[i]) & 0xffffff)) continue;
+			int off = 0;
+			for (int k = 0; k < 24; k += 8) off = std::max(off, std::abs(int((g[i] >> k) & 0xff) - int((c[i] >> k) & 0xff)));
+			if (loose && off <= 2) continue;   // (the 3D straight into the renderer's texture: a shadow over the 2D is the GPU's blend)
+			d.n++;
+			d.most = std::max(d.most, off);
+			d.big += off > 8;
+		}
+		d.wrong = d.big > std::max(64LL, (long long)(px / 100));
+		return d;
 	};
 	{
 		const char *rname = SDL_GetRendererName(ren);
@@ -2193,14 +2208,17 @@ int main(int argc, char **argv)
 						if (gpu_verified < 3 && gpu_pictures == (gpu_verified == 0 ? 1 : gpu_verified == 1 ? 60 : 600)) {
 							gpu_verified++;
 							std::vector<uint32_t> back;
-							bool same = gc.read(back) && back.size() == size_t(m.frame_w()) * m.frame_h();
-							const bool from_target = parts.d3_target >= 0;
+							const size_t px = size_t(m.frame_w()) * m.frame_h();
+							const bool read = gc.read(back) && back.size() == px;
 							m.redraw();
-							// (the 3D straight into the renderer's texture: a shadow over the 2D is the GPU's
-							// blend, within a level or two of the CPU's rounding down; else exact)
-							for (size_t i = 0; same && i < back.size(); i++) same = from_target ? near(back[i], m.frame().data()[i]) : back[i] == m.frame().data()[i];
-							if (!same) {   // the CPU's picture, from now on
-								fprintf(stderr, "pictures drawn on the CPU from now on: the GPU's picture %d differs from the CPU's\n", gpu_pictures);
+							const picture_diff d = read ? compare(back, m.frame().data(), px, parts.d3_target >= 0) : picture_diff{};
+							if (read && d.n && !d.wrong)
+								fprintf(stderr, "the GPU's picture %d: %lld of %d x %d pixels differ by rounding (%lld by more than 8, colours by %d at most): kept on the GPU\n",
+										gpu_pictures, d.n, m.frame_w(), m.frame_h(), d.big, d.most);
+							if (!read || d.wrong) {   // the CPU's picture, from now on
+								if (read) fprintf(stderr, "pictures drawn on the CPU from now on: the GPU's picture %d differs from the CPU's (%lld of %d x %d pixels, %lld by more than 8, colours by %d at most)\n",
+												  gpu_pictures, d.n, m.frame_w(), m.frame_h(), d.big, d.most);
+								else fprintf(stderr, "pictures drawn on the CPU from now on: the GPU's picture %d couldn't be read back\n", gpu_pictures);
 								gpu_2d = false;
 								gc.reset();
 								show_target = in_texture = false;
@@ -2210,11 +2228,9 @@ int main(int argc, char **argv)
 							std::vector<uint32_t> back;
 							if (gc.read(back)) {
 								m.redraw();
-								int n = 0;
-								const bool from_target = parts.d3_target >= 0;
-								for (size_t i = 0; i < back.size(); i++) n += from_target ? !near(back[i], m.frame().data()[i]) : back[i] != m.frame().data()[i];
+								const long long n = back.size() == size_t(m.frame_w()) * m.frame_h() ? compare(back, m.frame().data(), back.size(), parts.d3_target >= 0).n : -1;
 								gpu_checked++;
-								if (n) fprintf(stderr, "gpu check: picture %d: %d pixels differ (frame %llu, moment %.4f)\n", gpu_pictures, n, (unsigned long long)m.frame_number(), t);
+								if (n) fprintf(stderr, "gpu check: picture %d: %lld pixels differ (frame %llu, moment %.4f)\n", gpu_pictures, n, (unsigned long long)m.frame_number(), t);
 								if (n && getenv("VF_GPU_CHECK_DUMP")) {   // testing: both pictures
 									char path[512];
 									snprintf(path, sizeof path, "%s/gpu_%d.png", getenv("VF_GPU_CHECK_DUMP"), gpu_pictures);

@@ -1,5 +1,6 @@
 // Sega Model 1 glue: memory map, IRQ controller, timers, ROM banking and the per-frame loop.
 // Follows MAME's src/mame/sega/model1.cpp (BSD-3-Clause, copyright-holders: Olivier Galibert).
+#include <chrono>
 #include "model1.h"
 #include <zlib.h>
 
@@ -83,6 +84,20 @@ void model1::copro_reset()
 
 void model1::run_frame()
 {
+	// Random fighter: the select picks for the players, Akira (whose place the fighter has), player
+	// 1 first then player 2 (picking after player 1's same fighter gives player 2 Akira's other
+	// costume, so a fighter of their own). The cursors are in the players' blocks (40749c, 4074b0,
+	// 4074b3; player 2's 0x80 on); kick picks.
+	const uint8_t inputs_were[3] = { m_inputs[0], m_inputs[1], m_inputs[2] };   // (the presses below are this frame's only)
+	if (m_random_fighter && m_pick_at >= 0) {
+		const int64_t f = int64_t(m_frame) - m_pick_at, ph = f % 40;
+		if (ph >= 6 && ph <= 8 && m_ram_a.size() > 0x7600)
+			for (uint32_t pl = 0; pl < 2; pl++)
+				for (uint32_t a : { 0x749cu, 0x74b0u, 0x74b3u }) m_ram_a[a + pl * 0x80] = 0;
+		if (ph >= 10 && ph < 16) m_inputs[1] &= ~0x02;
+		if (ph >= 30 && ph < 36) m_inputs[2] &= ~0x02;
+	}
+
 	// the picture on screen was drawn from the state this frame is about to change: keep that
 	if (m_smooth && m_shown && m_shown_frame == m_frame) keep_still();
 	for (int line = 0; line < V_TOTAL; line++) {
@@ -106,6 +121,8 @@ void model1::run_frame()
 		if (on_line) on_line(line);
 	}
 	if (m_icon.on) secret_icon_frame();
+	if (m_random_fighter) random_fighter_frame();
+	memcpy(m_inputs, inputs_were, sizeof m_inputs);
 	// MAME draws the screen when vblank ends (VIDEO_UPDATE_AFTER_VBLANK): the 2D layers are
 	// as the vblank handler left them
 	if (m_draw) {
@@ -681,6 +698,192 @@ void model1::akira_slot_heads(uint32_t record)
 		made = true;
 	}
 	if (!made) std::fill(&rom[AT], &rom[LIST + 0x80], 0xff);   // (as it was: no ROM)
+}
+
+// Cheats' random fighter. A fighter's record (0x176 bytes) holds its body parts' models: torso
+// +12, hips +32, the near arm +1a/+1e, the far one +26/+2a, the front leg +36/+3a/+3e, the back
+// one +42/+46/+4a, the hands' poses +5e, +62 and +76 on (64 of them); and at +72 the list of its
+// head's models (the blinks), which the select's portrait draws too. The cast share a skeleton,
+// so any part sits on any body: the animation stays Akira's (or his place's), the parts are
+// anyone's. Akira's records: fd4f99 (player 1's costume) and fd3f6f (player 2's).
+void model1::set_random_fighter(bool on, bool moves, bool cpu)
+{
+	m_random_fighter = on;
+	m_random_moves = on && moves;
+	m_random_cpu = on && cpu;
+	m_select_seen = false;
+	random_fighter_roll();
+}
+
+// The records random fighters are made from and into: every record the slots point at, Akira's
+// two (fd4f99 player 1's costume, fd3f6f player 2's) and the Koskol brothers'. Their own data is
+// kept: the parts always come from the cast as they are, and Off puts them all back.
+model1::random_cast &model1::random_fighter_cast()
+{
+	static constexpr uint32_t SLOTS = 0xfd2e8f, KOSKOLS[3] = { 0xfd510f, 0xfd5285, 0xfd53fb };
+	random_cast &c = m_random_cast;
+	if (c.made) return c;
+	c.made = true;
+	auto &rom = m_regions.maincpu;
+	if (SLOTS + 26 * 4 > rom.size()) return c;
+	auto rd = [&](uint32_t a) { return uint32_t(rom[a] | rom[a + 1] << 8 | rom[a + 2] << 16 | uint32_t(rom[a + 3]) << 24); };
+	auto model = [&](uint32_t r, uint32_t o) { return (rd(r + o) >> 16) == 0x2d; };
+	auto add = [&](uint32_t r) {
+		if ((r >> 16) != 0xfd || r + RECORD_SIZE > rom.size() || c.orig.count(r)) return;
+		if (!model(r, 0x12) || !model(r, 0x1a) || !model(r, 0x36)) return;
+		c.orig[r].assign(&rom[r], &rom[r] + RECORD_SIZE);
+		c.recs.push_back(r);
+		if ((rd(r + 0x72) >> 16) == 0xfd) c.heads.push_back(r);
+		const uint32_t t = rd(r + 4);
+		if ((t >> 16) == 0xfc && t + MOVE_COUNT * 4 <= rom.size() && std::find(c.tables.begin(), c.tables.end(), t) == c.tables.end()) c.tables.push_back(t);
+	};
+	// Akira's two by name: the slots may hold a secret character in his place just now (Cheats'
+	// Secret character, set before Random fighter was turned on), and this list is made once
+	add(0xfd4f99);
+	add(0xfd3f6f);
+	for (int i = 0; i < 26; i++) add(rd(SLOTS + 4 * i));
+	for (uint32_t r : KOSKOLS) add(r);
+	return c;
+}
+
+uint32_t model1::random_next(uint32_t n)
+{
+	uint32_t &x = m_random_state;   // xorshift, seeded from the frame and the clock
+	if (!x) x = uint32_t(m_frame * 2654435761u) ^ uint32_t(std::chrono::steady_clock::now().time_since_epoch().count()) ^ 0x9e3779b9u;
+	x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+	return n ? x % n : 0;
+}
+
+// One record made a random fighter: each group of parts (a pair of limbs as one) from a random
+// fighter's own, a random head (+72, the select's portrait too), and with random moves a moves
+// table of its own (in the ROM's empty space, f81000 on: 0x300 bytes a record), each command's
+// entry from a random fighter's table. The moves are numbered alike for everyone (Siba's are
+// mostly Lau's) and the cast share a skeleton, so any part and move fits anyone.
+void model1::random_fighter_make(uint32_t rec)
+{
+	random_cast &c = random_fighter_cast();
+	auto &rom = m_regions.maincpu;
+	auto it = c.orig.find(rec);
+	if (it == c.orig.end() || c.recs.empty() || c.heads.empty()) return;
+	auto orig = [&](uint32_t r, uint32_t o) { const auto &b = c.orig.at(r); return uint32_t(b[o] | b[o + 1] << 8 | b[o + 2] << 16 | uint32_t(b[o + 3]) << 24); };
+	auto wr = [&](uint32_t a, uint32_t v) { for (int b = 0; b < 4; b++) rom[a + b] = uint8_t(v >> (8 * b)); };
+	auto model = [&](uint32_t r, uint32_t o) { return (orig(r, o) >> 16) == 0x2d; };
+	memcpy(&rom[rec], it->second.data(), RECORD_SIZE);
+	static const std::vector<std::vector<uint32_t>> GROUPS = [] {
+		std::vector<std::vector<uint32_t>> g = { { 0x12 }, { 0x32 }, { 0x1a, 0x26 }, { 0x1e, 0x2a }, { 0x36, 0x42 }, { 0x3a, 0x46 }, { 0x3e, 0x4a }, { 0x5e, 0x62 } };
+		for (uint32_t o = 0x76; o < 0x176; o += 4) g.back().push_back(o);   // (the hands' poses: one hand set)
+		return g;
+	}();
+	for (const auto &g : GROUPS) {
+		const uint32_t src = c.recs[random_next(uint32_t(c.recs.size()))];
+		for (uint32_t o : g)
+			if (model(src, o) && model(rec, o)) wr(rec + o, orig(src, o));
+	}
+	if ((orig(rec, 0x72) >> 16) == 0xfd) wr(rec + 0x72, orig(c.heads[random_next(uint32_t(c.heads.size()))], 0x72));
+	if (m_random_moves && !c.tables.empty()) {
+		const uint32_t at = 0xf81000 + 0x300 * uint32_t(std::find(c.recs.begin(), c.recs.end(), rec) - c.recs.begin());
+		if (at + MOVE_COUNT * 4 > 0xfc0000 || at + MOVE_COUNT * 4 > rom.size()) return;
+		for (uint32_t k = 0; k < MOVE_COUNT; k++) {
+			const uint32_t t = c.tables[random_next(uint32_t(c.tables.size()))];
+			memcpy(&rom[at + 4 * k], &rom[t + 4 * k], 4);
+		}
+		wr(rec + 4, at);
+	}
+}
+
+// All of the cast as they are, then Akira's two made random (Akira's place), and with random
+// opponents every other record too (the computer's next one is made afresh as it comes in:
+// random_fighter_frame).
+void model1::random_fighter_roll()
+{
+	static constexpr uint32_t AKIRA[2] = { 0xfd4f99, 0xfd3f6f };
+	random_cast &c = random_fighter_cast();
+	auto &rom = m_regions.maincpu;
+	for (const auto &[r, b] : c.orig) memcpy(&rom[r], b.data(), RECORD_SIZE);
+	if (!m_random_fighter) { random_fighter_strands(true); return; }
+	for (uint32_t r : AKIRA) random_fighter_make(r);
+	if (m_random_cpu)
+		for (uint32_t r : c.recs)
+			if (r != AKIRA[0] && r != AKIRA[1]) random_fighter_make(r);
+}
+
+// The strands that swing (Sarah's ponytail, Pai's and Lau's braids, Akira's headband ribbon) are
+// listed by the player's slot, not by record (fda917: a slot byte and a pointer to its strands,
+// 5 bytes each, to ff; read for each fighter at ffc4b6 by its block's slot, -4c). With random
+// heads they'd hang where the slot's own head was: the list is made afresh for the two players
+// each frame, each slot with the strands of the head its record wears now (none for a head
+// without), and put back as VF has it when Random fighter goes off.
+void model1::random_fighter_strands(bool restore)
+{
+	static constexpr uint32_t LIST = 0xfda917, SLOTS = 0xfd2e8f;
+	auto &rom = m_regions.maincpu;
+	if (LIST + 80 > rom.size() || m_ram_a.size() < 0x1f00) return;
+	if (m_strands_orig.empty()) {
+		size_t n = 0;
+		while (n < 75 && rom[LIST + n] != 0xff) n += 5;
+		if (n >= 75) return;   // (not VF's list)
+		m_strands_orig.assign(&rom[LIST], &rom[LIST] + n + 1);
+	}
+	auto put = [&](const std::vector<uint8_t> &b) { if (memcmp(&rom[LIST], b.data(), b.size())) memcpy(&rom[LIST], b.data(), b.size()); };
+	if (restore || !m_random_fighter) { put(m_strands_orig); return; }
+	random_cast &c = random_fighter_cast();
+	auto rd = [&](const uint8_t *p) { return uint32_t(p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24); };
+	auto orig_strands = [&](uint8_t slot) -> uint32_t {   // a slot's own, or 0
+		for (size_t i = 0; i + 5 <= m_strands_orig.size(); i += 5)
+			if (m_strands_orig[i] == slot) return rd(&m_strands_orig[i + 1]);
+		return 0;
+	};
+	// a head list -> the strands of the slot whose own record wears it
+	auto strands_of_head = [&](uint32_t head, uint8_t slot) -> uint32_t {
+		for (uint32_t s = 0; s < 26; s++) {
+			const uint32_t r = rd(&rom[SLOTS + 4 * s]);
+			auto it = c.orig.find(r);
+			if (it != c.orig.end() && rd(&it->second[0x72]) == head) return orig_strands(uint8_t(s));
+		}
+		for (const auto &[r, b] : c.orig)   // (Akira's two, not in the slots while a secret character is)
+			if (rd(&b[0x72]) == head) return orig_strands(r == 0xfd4f99 ? 0x16 : r == 0xfd3f6f ? 0x0b : 0xff);
+		return orig_strands(slot);
+	};
+	std::vector<uint8_t> list;
+	for (int pl = 0; pl < 2; pl++) {
+		const uint32_t block = 0x700 + 0x1800 * pl;
+		const uint8_t slot = m_ram_a[block - 0x4c];
+		const uint32_t rec = rd(&m_ram_a[block - 0x50]);
+		if ((rec >> 16) != 0xfd || rec + RECORD_SIZE > rom.size()) continue;
+		const uint32_t head = rd(&rom[rec + 0x72]);
+		const uint32_t st = (head >> 16) == 0xfd ? strands_of_head(head, slot) : orig_strands(slot);
+		bool dup = false;
+		for (size_t i = 0; i < list.size(); i += 5) dup |= list[i] == slot;
+		if (!st || dup) continue;
+		list.push_back(slot);
+		for (int b = 0; b < 4; b++) list.push_back(uint8_t(st >> (8 * b)));
+	}
+	list.push_back(0xff);
+	if (list.size() <= m_strands_orig.size()) put(list);
+}
+
+// A new player select: a new fighter (the select's own Akira icon, b080, comes into the tiles)
+void model1::random_fighter_frame()
+{
+	bool select = false;
+	for (uint32_t i = 0; i < 0x4000 - 8 * 64 && !select; i++)
+		select = m_tiles.tile_r(i) == 0xb080 && m_tiles.tile_r(i + 1) == 0xb081 && m_tiles.tile_r(i + 64) == 0xb087;
+	if (select && !m_select_seen) { random_fighter_roll(); m_pick_at = int64_t(m_frame); }
+	random_fighter_strands(false);
+	// Random opponents: each player's fighter is in its block (player 1's at 4006b0, player 2's
+	// 0x1800 on), set as a match loads: a new one there (the computer's next opponent) is made
+	// afresh, so even the same character twice comes in new.
+	if (m_random_cpu && m_ram_a.size() > 0x1eb4)
+		for (int pl = 0; pl < 2; pl++) {
+			const uint32_t o = 0x6b0 + 0x1800 * pl;
+			const uint32_t r = uint32_t(m_ram_a[o] | m_ram_a[o + 1] << 8 | m_ram_a[o + 2] << 16 | uint32_t(m_ram_a[o + 3]) << 24);
+			if (r != m_random_seen[pl]) {
+				m_random_seen[pl] = r;
+				if (r != 0xfd4f99 && r != 0xfd3f6f && !select) random_fighter_make(r);
+			}
+		}
+	if (!select) m_pick_at = -1;
+	m_select_seen = select;
 }
 
 // The select's icons for the characters without one (all but Siba, whose is in the ROM): pictures

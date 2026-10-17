@@ -115,6 +115,28 @@ public:
 		std::vector<uint16_t> keep_chars, keep_pal, keep_map;   // VF's own, put back after
 	} m_icon;
 	void secret_icon_frame();
+	// Cheats: a random fighter in Akira's place, a patchwork of the cast's (and the cut characters')
+	// body parts, a pair of limbs from one of them, and a head of one, made afresh each time the
+	// player select comes up. Both of Akira's costumes (player 1's and player 2's) get their own.
+	void set_random_fighter(bool on, bool moves = false, bool cpu = false);   // moves: each command's move from a random fighter too; cpu: every opponent random too
+	bool m_random_fighter = false, m_random_moves = false, m_random_cpu = false, m_select_seen = false;
+	static constexpr uint32_t RECORD_SIZE = 0x176, MOVE_COUNT = 187;
+	struct random_cast {
+		bool made = false;
+		std::map<uint32_t, std::vector<uint8_t>> orig;   // each record's own
+		std::vector<uint32_t> recs, heads, tables;       // the records, those with a head list, the moves tables
+	} m_random_cast;
+	uint32_t m_random_seen[2] = { 0, 0 };   // (each player's fighter last seen in their block)
+	random_cast &random_fighter_cast();
+	uint32_t random_next(uint32_t n);
+	void random_fighter_make(uint32_t rec);
+	void random_fighter_strands(bool restore);
+	std::vector<uint8_t> m_strands_orig;   // (the fight's swinging-strand list, fda917, as VF has it)
+	int64_t m_pick_at = -1;   // (the frame the select came up: the random fighter is picked for the players)
+	uint32_t m_random_state = 0;
+	void random_fighter_roll();
+	void random_fighter_frame();
+	bool random_select_showing() const { return m_random_fighter && m_select_seen; }
 	// Replaces n bytes of the main CPU program, if their CRC-32 is `crc` (guards against other sets).
 	bool patch_program(uint32_t addr, size_t n, uint32_t crc, const uint8_t *to);
 	// Blanks the FREE PLAY notices (the attract/title one and the fight's): for the PC build,

@@ -371,12 +371,16 @@ dialog .x:hover{background:rgba(255,255,255,.2)}
       </div></span>
     <span class="info"><button class="lnk" aria-expanded="false">Changelog</button>
       <div class="pop" role="dialog" aria-label="Changelog">
-        <p><b>v1.3.1</b> &middot; %DATE%</p>
+        <p><b>v1.3.2</b> &middot; %DATE%</p>
         <ul>
+          <li>Fixed: on Windows with an NVIDIA card, at high render scales in 16:9, the game could stop putting its pictures together on the GPU right after starting and drop to 60 frames a second. A few pixels of rounding difference no longer switch the GPU off; log.txt says how many differed.</li>
+        </ul>
+        <details><summary>v1.3.1</summary><ul>
           <li>Fixed: secret characters (Siba, Jeff and the rest) no longer stretch for a moment when a kick knocks the other fighter down.</li>
           <li>Fixed: camera cuts are clean, like TIME OVER's and the demo's throws and kicks, with no swoops through views and poses the game never shows.</li>
           <li>Portable mode: portable.txt also counts in the folder above the game's, the one the download was unzipped to.</li>
-        </ul>
+          <li>Dural in Akira's place clanks like the arcade's.</li>
+        </ul></details>
         <details><summary>v1.3.0</summary><ul>
           <li><b>Secret characters:</b> Menu &gt; Cheats &gt; Secret character puts a fighter cut from the arcade ROM in Akira's spot: Siba, Jeff, Takeru (the early Akira), the Koskol brothers Rekka, Score and Aeon, or Dural. Unfinished in the original (borrowed moves, no throws).</li>
           <li><b>Portraits and icons made from the game's own 3D models:</b> only Siba ever got select-screen art. The rest were rendered by the game's own renderer from their real models in the ROM, then matched to the cast: eye height, centring and head size, and icons in the same 12-colour pixel-art look.</li>
