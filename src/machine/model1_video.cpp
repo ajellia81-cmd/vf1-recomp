@@ -1315,7 +1315,14 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 	static const char *theme_test = getenv("VF_OUTFIT_THEME");   // TESTONLY (VF_OUTFIT_THEME=n: every fighter's theme n)
 	// (none at a select: its portraits are heads, the last match's records' models in them (a challenger's
 	// select) not those fighters')
-	if (m_random_fighter && !m_random_outfit.empty() && !m_select_seen) {
+	// (the old scene's last pictures, up to 3 frames after a record changes: the old fighters' models as
+	// they were, those a new random fighter shares too (made of the cast's parts), so no part takes the
+	// new fighter's colours for the old scene's last frames before the cut)
+	build_prev *old_scene = nullptr;
+	if (m_random_fighter && !m_select_seen)
+		for (build_prev &p : m_build_prev)
+			if (p.rec && int64_t(m_frame) < p.until - BUILD_PREV_FRAMES + BUILD_SCENE_LAG && p.models.count(poly_adr)) { old_scene = &p; break; }
+	if (m_random_fighter && !m_random_outfit.empty() && !m_select_seen && !old_scene) {
 		const int pl = model_owner(poly_adr);
 		const uint32_t rec = pl >= 0 ? m_build[pl].rec : 0;
 		static const bool skin_off = getenv("VF_SKIN_MATCH") && !strcmp(getenv("VF_SKIN_MATCH"), "off");   // TESTONLY
@@ -1331,7 +1338,7 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 	// (not a player's record's now: one just gone, as it was (build_prev), for the old scene's pictures)
 	if (m_random_fighter && outfit < 0 && !skin_rec && !m_select_seen)
 		for (build_prev &p : m_build_prev)
-			if (p.until >= int64_t(m_frame) && p.models.count(poly_adr)) {
+			if (old_scene ? &p == old_scene : p.until >= int64_t(m_frame) && p.models.count(poly_adr)) {
 				static const bool skin_off = getenv("VF_SKIN_MATCH") && !strcmp(getenv("VF_SKIN_MATCH"), "off");   // TESTONLY
 				if (!(outfit_test && !strcmp(outfit_test, "off")) && p.outfit >= 0) {
 					outfit = outfit_test && *outfit_test ? float(atof(outfit_test)) : p.outfit;
@@ -1624,7 +1631,9 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 				if (dl > 0) { hh = mx == fr ? (fg - fb) / dl : mx == fg ? 2 + (fb - fr) / dl : 4 + (fr - fg) / dl; hh /= 6; if (hh < 0) hh += 1; }
 				const bool skin = hh > 0.015f && hh < 0.13f && ss > 0.15f && ss < 0.75f && vv > 0.45f;
 				const bool eyes = ss < 0.2f && vv > 0.55f;                       // (eyes and teeth, white or light grey: Jeffry's are grey)
-				const bool mouth = ss > 0.6f && (hh < 0.04f || hh > 0.9f);       // (mouths and lips, red)
+				// (mouths: a full red, Sarah's lips too. A browner red (Wolf's hair, Kage's band) is hair or a band, and
+				// Pai's pink lips take the hue as well: counted as a mouth, Wolf's hair kept its orange in every hue)
+				const bool mouth = ss > 0.9f && hh < 0.04f;
 				if (head_metal >= 0) {   // (Dural's head: all of it in the metal's tint, its shading kept)
 					hh = head_hue;
 					ss = head_metal;

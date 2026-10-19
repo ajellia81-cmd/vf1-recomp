@@ -379,3 +379,33 @@ std::unique_ptr<gpu3d> gpu3d_create_sdlgpu_on(void *sdl_gpu_device)
 	if (!g->init()) return nullptr;
 	return g;
 }
+
+// (Windows' headers last, after everything above: their macros touch nothing here)
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <dxgi.h>
+#endif
+bool gpu3d_prefer_vulkan()
+{
+	bool amd = false;
+#ifdef _WIN32
+	// (DXGI's adapters, the software one skipped: an AMD one's vendor 0x1002)
+	using create_t = HRESULT(WINAPI *)(REFIID, void **);
+	HMODULE dxgi = LoadLibraryA("dxgi.dll");
+	auto create = dxgi ? reinterpret_cast<create_t>(reinterpret_cast<void *>(GetProcAddress(dxgi, "CreateDXGIFactory1"))) : nullptr;
+	IDXGIFactory1 *factory = nullptr;
+	if (create && SUCCEEDED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(&factory))) && factory) {
+		IDXGIAdapter1 *a = nullptr;
+		for (UINT i = 0; factory->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; i++) {
+			DXGI_ADAPTER_DESC1 d;
+			if (SUCCEEDED(a->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && d.VendorId == 0x1002) amd = true;
+			a->Release();
+		}
+		factory->Release();
+	}
+	if (dxgi) FreeLibrary(dxgi);
+#endif
+	return amd;
+}

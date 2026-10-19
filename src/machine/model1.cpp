@@ -1353,7 +1353,7 @@ void model1::random_fighter_build(bool select)
 		if (select_over) b.rec = 0;
 		if (b.start >= 0 && int64_t(m_frame) - b.start > BUILD_COLOUR + 8 * BUILD_COLOUR_STEP + BUILD_COLOUR_SPAN + BUILD_FLASH) { b.start = -1; b.group.clear(); }
 		if (rec == b.rec) continue;
-		if (b.rec && m_random_names.count(b.rec) && !select_over) {   // (the last record's, as it was: build_prev)
+		if (b.rec && !select_over) {   // (the last record's, as it was: build_prev; a cast one's too, its colours its own)
 			build_prev &p = m_build_prev[pl];
 			p.rec = b.rec;
 			p.until = int64_t(m_frame) + BUILD_PREV_FRAMES;

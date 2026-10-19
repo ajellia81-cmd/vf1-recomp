@@ -1009,9 +1009,17 @@ int main(int argc, char **argv)
 	// SDL's own, chooses over this; VF_NO_GPU_RENDERER=1 skips it, tests. A start that closed while
 	// starting it leaves gpu-start.crashed, as the 3D's own start does below: SDL's usual one then.)
 	const std::string gpu_marker = dir + "/gpu-start.crashed";
+	const bool vk_first = !getenv("SDL_GPU_DRIVER") && gpu3d_prefer_vulkan();
 	if (cfg.renderer3d != 0 && !getenv("SDL_RENDER_DRIVER") && !getenv("VF_NO_GPU_RENDERER") && !SDL_GetPathInfo(gpu_marker.c_str(), nullptr)) {
 		if (SDL_IOStream *io = SDL_IOFromFile(gpu_marker.c_str(), "w")) SDL_CloseIO(io);
-		ren = SDL_CreateRenderer(win, "gpu");
+		// (an AMD card on Windows: Vulkan first, Direct3D 12 if it won't start, gpu3d_prefer_vulkan)
+		if (vk_first) {
+			SDL_SetHint(SDL_HINT_GPU_DRIVER, "vulkan");
+			ren = SDL_CreateRenderer(win, "gpu");
+			fprintf(stderr, "SDL's gpu renderer: Vulkan (an AMD card): %s\n", ren ? "started" : SDL_GetError());
+			SDL_ResetHint(SDL_HINT_GPU_DRIVER);
+		}
+		if (!ren) ren = SDL_CreateRenderer(win, "gpu");
 		SDL_RemovePath(gpu_marker.c_str());
 		if (!ren) fprintf(stderr, "SDL's gpu renderer: %s (SDL's usual renderer instead)\n", SDL_GetError());
 	}
@@ -1165,6 +1173,7 @@ int main(int argc, char **argv)
 				const char *rn = SDL_GetRendererName(ren);
 				if (gpu_2d && rn && !strcmp(rn, "gpu") && !getenv("VF_G3_OWN_DEVICE")) g3_shared = (g3 = gpu3d_create_sdlgpu_on(SDL_GetGPURendererDevice(ren))) != nullptr;
 			}
+			if (!g3 && vk_first) g3 = gpu3d_create_sdlgpu("vulkan");
 			if (!g3) g3 = gpu3d_create_sdlgpu();
 			SDL_RemovePath(marker.c_str());
 			fprintf(stderr, "the 3D on the GPU: %s (%.0f ms to start)\n", g3 ? g3->name() : "none here (the CPU's 3D)", (SDL_GetTicksNS() - t0) / 1e6);
@@ -1244,13 +1253,15 @@ int main(int argc, char **argv)
 				if (d > 0) fprintf(stderr, "the 3D on the GPU (%s): its test picture isn't the CPU's (%lld of %lld pixels differ, %lld drawn on one only, %lld by more than %d)\n",
 								   g3->name(), d, px, dd.cover, dd.big, model1::GPU_ROUNDING_COLOUR);
 				else fprintf(stderr, "the 3D on the GPU (%s): its test picture failed\n", g3->name());
-				if (attempt == 0 && !strncmp(g3->name(), "direct3d12", 10) && !getenv("SDL_GPU_DRIVER")) {
+				// (and an AMD card's Vulkan, chosen first, failing: Direct3D 12's tried)
+				const bool d3d = !strncmp(g3->name(), "direct3d12", 10), vk = vk_first && !strncmp(g3->name(), "vulkan", 6);
+				if (attempt == 0 && (d3d || vk) && !getenv("SDL_GPU_DRIVER")) {
 					m.set_gpu3d(nullptr);
 					m.set_gpu3d_target(false);
 					g3_shared = false;
 					g3.reset();
-					g3 = gpu3d_create_sdlgpu("vulkan");
-					fprintf(stderr, "the 3D on the GPU: trying Vulkan instead: %s\n", g3 ? g3->name() : "none here");
+					g3 = gpu3d_create_sdlgpu(d3d ? "vulkan" : "direct3d12");
+					fprintf(stderr, "the 3D on the GPU: trying %s instead: %s\n", d3d ? "Vulkan" : "Direct3D 12", g3 ? g3->name() : "none here");
 					if (g3) { m.set_gpu3d(g3.get()); a3.tested = false; continue; }
 					a3.broken = true; a3.gpu = false; apply_3d();   // (g3 gone: the CPU's)
 					return;
@@ -2339,7 +2350,10 @@ int main(int argc, char **argv)
 			const bool *ks = SDL_GetKeyboardState(nullptr);
 			const bool ff = ks[SDL_SCANCODE_TAB];
 			const uint64_t now_ns = SDL_GetTicksNS();
-			const double dt = double(now_ns - clock_t) / 1e9;
+			// testing: VF_STEP_HZ=n steps the game's clock 1/n s a pass, whatever the time the pass took (with
+			// VF_HIDDEN, VF_HZ high and VF_CAPTURE: every in-between picture, on a machine too slow to keep up)
+			static const double fixed_dt = getenv("VF_STEP_HZ") ? 1.0 / atof(getenv("VF_STEP_HZ")) : 0;
+			const double dt = fixed_dt > 0 ? fixed_dt : double(now_ns - clock_t) / 1e9;
 			clock_t = now_ns;
 			double rate = FRAME_HZ;
 			int low = 0;                         // frames the sound needs at once (it's nearly run dry)

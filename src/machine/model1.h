@@ -262,6 +262,7 @@ public:
 	// cast's for a frame, or took the record's new ones as Random opponents remade it))
 	struct build_prev { uint32_t rec = 0; int64_t until = -1; std::unordered_set<uint32_t> models; float outfit = -1; int theme = 0; outfit_tones tones; skin_sum skin; bool has_skin = false; } m_build_prev[2];
 	static constexpr int BUILD_PREV_FRAMES = 12;   // (one skin a fighter: each record's face's skin, each body model's own)   // (each record's clothes' brightnesses seen: black and white's, black and gold's split)
+	static constexpr int BUILD_SCENE_LAG = 4;   // (a record changed, the old scene's pictures go on for 3 frames: the new scene's from the 4th)
 	enum { THEME_TURN, THEME_BW, THEME_BLACK_GOLD, THEME_COOL, THEME_WARM, THEME_OPPOSITE, THEME_NEON, THEME_PASTEL, OUTFIT_THEMES };
 	int model_owner(uint32_t poly_adr) const;   // (a record's model: whose, by the nearer torso if both's; -1 neither's)
 	// each player's styled models last frame, and those of the record before for a few frames after

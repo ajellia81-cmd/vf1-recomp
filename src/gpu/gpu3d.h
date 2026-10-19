@@ -87,3 +87,7 @@ std::unique_ptr<gpu3d> gpu3d_create_sdlgpu(const char *driver = nullptr);   // (
 // The same on the device of SDL's "gpu" renderer (an SDL_GPUDevice *, the host's), which can draw
 // straight into the renderer's textures (draw_target). The device stays the renderer's.
 std::unique_ptr<gpu3d> gpu3d_create_sdlgpu_on(void *sdl_gpu_device);
+// Whether SDL_GPU should be asked for Vulkan first: on Windows with an AMD card (vf2-recomp #19: an RX
+// 9070 on Direct3D 12 took 15 s to start and ~29 ms to take each picture, 30 a second at any scale;
+// on Vulkan 6x at the screen's rate). Elsewhere false (Linux is Vulkan already).
+bool gpu3d_prefer_vulkan();

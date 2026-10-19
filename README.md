@@ -63,6 +63,10 @@ your screen's refresh rate.
 
 ## Random fighters
 
+<p align="center">
+  <a href="https://youtu.be/9H62laX0VAI"><img src="https://img.youtube.com/vi/9H62laX0VAI/maxresdefault.jpg" alt="Watch: Virtua Fighter 1 But Every Character Is Randomized" width="800"></a>
+</p>
+
 Menu > Cheats > **Player 1 fighter** (and **Player 2 fighter**):
 
 - **Random:** a new fighter every game, its head, body and limbs from three of the cast and its moves dealt from the
