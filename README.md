@@ -51,34 +51,45 @@ your screen's refresh rate.
 | The arcade's V60 program, recompiled to native code | Working |
 | TGP, rasterizer, tile layers, sound and I/O boards | Working: reimplemented from MAME's Model 1 code |
 | Render scale up to 6x, widescreen and ultrawide, smooth motion | Working |
-| The 3D drawn on the GPU (Display > 3D renderer: Auto, GPU or CPU) | Working on macOS (Metal), Windows (Direct3D 12 or Vulkan) and Steam Deck / Linux (Vulkan): the same picture as the CPU's, checked when the game starts; Auto uses the GPU unless it's clearly slower, and any difference or error falls back to the CPU |
+| The 3D drawn on the GPU (Display > 3D renderer: Auto, GPU or CPU) | Working on macOS (Metal), Windows (Direct3D 12 or Vulkan) and Steam Deck / Linux (Vulkan): the same picture as the CPU's, checked when the game starts; Auto uses the GPU whenever that check passes (not a software GPU such as llvmpipe), and any difference or error falls back to the CPU |
 | Sarah's stage lighting (the light from below pulsing with the floor) | Working, as on the cabinet |
 | Portable mode, your own ROM folder | Working |
 | Menu, keyboard and gamepads, two players | Working |
 | macOS, Windows, Steam Deck / x86-64 Linux | Working |
 | Painted widescreen sides for the title and player select | Working in the downloads; not in this repository (4:3 without them) |
-| Secret characters and cheats (menu > Cheats) | Working: see below |
+| Random fighters, secret characters and cheats (menu > Cheats) | Working: see below |
+| The game's language (menu > Arcade settings: English or Japanese) | Working; English from the first start |
 | Online play | Not yet |
+
+## Random fighters
+
+Menu > Cheats > **Player 1 fighter** (and **Player 2 fighter**):
+
+- **Random:** a new fighter every game, its head, body and limbs from three of the cast and its moves dealt from the
+  same three, so it plays like a mix of them, at the real game's timings. Its voice
+  is one of the three's, and it gets a name made of theirs on the energy bar (JACPAIWOLF, WOLFLAURAH).
+- **Seed:** type a fighter's name, as seen on an energy bar, to get that fighter again: the same build and the same
+  moves on any machine. The colours are new every game.
+- **Secret character:** one of the fighters cut from the game, below.
+
+Anything but Normal is picked for you at the select. Round 1 builds each random fighter from its polygons as the fight
+starts. **Random opponents** makes every computer opponent a random fighter, made afresh for each match.
 
 ## Secret characters
 
-Menu > Cheats > **Secret character** puts a fighter cut from the arcade ROM in Akira's spot on the player select:
-Siba (Majido), Jeff, Takeru (the early Akira), the Koskol brothers Rekka, Score and Aeon, and Dural. They were never
-finished (borrowed moves, no throws), so expect oddities.
+Menu > Cheats > **Player 1 fighter** (or **Player 2 fighter**) > **Secret character**, then **Character**: a fighter
+cut from the arcade ROM, picked for you at the select: Siba (Majido), Jeff, Takeru (the early Akira), the Koskol
+brothers Rekka, Score and Aeon, or Dural. They were never finished (borrowed moves, no throws), so expect oddities.
+The other player and the computer keep the real Akira.
 
-**Portraits and icons made from the game's own models.** Only Siba ever got select art; the rest had none, so the
-select screen showed Akira's (or nothing). Each one now has a portrait and an icon drawn from its real 3D head in the
+**Portraits made from the game's own models.** Only Siba ever got select art; the rest had none, so the
+select screen showed Akira's (or nothing). Each one now has a portrait drawn from its real 3D head in the
 ROM, by the game's own renderer:
 
 - **Portraits:** the game's select screen draws a live 3D head in a camera of its own per character. The ones without
   a portrait get one built from their fight head, and each has its own camera, found by rendering every head against
   the cast's and measuring: the eyes at the same height, the face in the middle, the head the same size, the neck off
   the bottom. Dural's is also turned to face the way the others do.
-- **Icons:** the select row's icons are flat pixel art, not 3D. Each new one is the character's head rendered by the
-  game at a three-quarter turn, then fitted to Akira's real icon: the same framing and scale (found by matching a render
-  of Akira's head to his icon), the same brightness, and cut down to 12 colours in his frame, so it sits in the row
-  like the originals. While one is in Akira's spot, the game's tiles for his icon are swapped for it, and put back
-  after. The tools are in `tools/icons`; the icons ship with the downloads, not in this repository.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/fe3dc5a5-1e77-413d-8c21-c08bcd572c8c" alt="The secret characters in action at 3x: Dural, Siba, Jeff, Takeru and Rekka on five stages, and Jeff on the player select" width="800">
@@ -89,16 +100,16 @@ ROM, by the game's own renderer:
 
 | Character | Select screen | Health bar | Notes |
 | --- | --- | --- | --- |
-| Siba (Majido) | Own portrait, icon and profile; named MAJIDO (P1) or SHIIBA (P2) | MAJIDO | The most complete of them. His pounce is Lau's: his own had no jump in its data and flew him across the ring |
-| Jeff | Own portrait and profile, a made icon; named JEFFERY | JEFF | A handful of Jacky's moves; his hat and shades can be knocked off |
-| Takeru | Akira's name and profile, a made icon | AKIRA | The early Akira, in Akira's headband |
-| Rekka | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | Rekka and Score share a head |
-| Score | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | Looks like Rekka |
-| Aeon | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | |
-| Dural | Made portrait (no blinking) and icon; Akira's name and profile | DURAL | |
+| Siba (Majido) | Own portrait and profile; named MAJIDO (P1) or SHIIBA (P2) | SIBA | The most complete of them. His pounce is Lau's: his own had no jump in its data and flew him across the ring |
+| Jeff | Own portrait and profile; named JEFFERY | JEFF | A handful of Jacky's moves; his hat and shades can be knocked off |
+| Takeru | Own portrait and profile (as Akira Ryuzaki, his early name) | TAKERU | The early Akira, in Akira's headband |
+| Rekka | Made portrait (no blinking) | REKKA | Rekka and Score share a head |
+| Score | Made portrait (no blinking) | SCORE | Looks like Rekka |
+| Aeon | Made portrait (no blinking) | AEON | |
+| Dural | Made portrait (no blinking) | DURAL | |
 
-They take Akira's place, so arcade mode's CPU Akira is them too, and Akira can't be picked while one is on. The rest
-of Cheats: infinite energy (player 1, 2 or both), one-hit KO, no time limit, and a tiny or huge ring.
+The rest of Cheats: Kage's mask (a hit can knock his hood back, as on a cabinet played for nine hours), infinite
+energy (player 1, 2 or both), one-hit KO, no time limit, and a tiny or huge ring.
 
 ### Who they were
 

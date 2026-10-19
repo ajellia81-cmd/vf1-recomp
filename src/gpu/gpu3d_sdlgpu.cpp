@@ -73,11 +73,13 @@ public:
 			m_target = make(gpu3d_target_spv, sizeof gpu3d_target_spv, gpu3d_target_dxil, sizeof gpu3d_target_dxil, "target", 3, 0, 8, 8, 1);
 		const char *dn = SDL_GetStringProperty(SDL_GetGPUDeviceProperties(m_dev), SDL_PROP_GPU_DEVICE_NAME_STRING, "?");
 		snprintf(m_name, sizeof m_name, "%s (%s)", SDL_GetGPUDeviceDriver(m_dev), spirv ? "SPIR-V" : "DXIL");
+		m_software = strstr(dn, "llvmpipe") || strstr(dn, "lavapipe") || strstr(dn, "softpipe") || strstr(dn, "SwiftShader") || strstr(dn, "Software") || strstr(dn, "Basic Render");   // (Windows' WARP: "Microsoft Basic Render Driver")
 		fprintf(stderr, "gpu3d sdl_gpu: %s on %s, its pipelines ready in %.0f ms\n", m_name, dn,
 				std::chrono::duration<double, std::milli>(clk::now() - t0).count());
 		return true;
 	}
 	const char *name() const override { return m_name; }
+	bool software() const override { return m_software; }
 
 	bool draw(const gpu3d_poly *polys, size_t count, const gpu3d_span *spans, size_t nspans, size_t rowspans,
 		uint32_t *px, size_t bytes, int w, int h, int y0, int y1, double *gpu_ms) override
@@ -229,7 +231,7 @@ private:
 					SDL_BindGPUComputeStorageBuffers(c, 0, ro, 4);
 					const uint32_t k[4] = { ns, W, 0, 0 };
 					SDL_PushGPUComputeUniformData(cb, 0, k, sizeof k);
-					dispatch1(c, ns);
+					dispatch1(c, ns * 8);   // (8 threads a span, gpu3d.hlsl's L)
 					SDL_EndGPUComputePass(c);
 				}
 				if (!to_target) {
@@ -345,6 +347,7 @@ private:
 	SDL_GPUDevice *m_dev;
 	bool m_own;
 	char m_name[64] = "sdl_gpu";
+	bool m_software = false;
 	SDL_GPUComputePipeline *m_clear = nullptr, *m_rows = nullptr, *m_solid = nullptr, *m_shadow = nullptr, *m_pixels = nullptr, *m_target = nullptr;
 	std::vector<SDL_GPUTexture *> m_tg;
 	std::vector<SDL_GPUFence *> m_fence;   // each target's last picture

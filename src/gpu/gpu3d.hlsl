@@ -194,16 +194,19 @@ cbuffer k : register(b0, space2) { uint k_total; uint k_W; uint k_pad0; uint k_p
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID)
 {
+	// (L threads a span, as the solid pass: a close-up's shadow is thousands of pixels a row at 6x,
+	// one thread each walking a whole row took 15-20 ms a picture, vf1-recomp #16's intro)
 	const uint t = tid.x + tid.y * 65535u * 64u;
-	if (t >= k_total) return;
-	const span s = spans.Load<span>((t) * sizeof(span));
+	if (t / L >= k_total) return;
+	const int lane = int(t % L);
+	const span s = spans.Load<span>((t / L) * sizeof(span));
 	if (s.xa > s.xb) return;
 	const poly q = polys.Load<poly>((s.poly) * sizeof(poly));
 	if (!(q.flags & SHADOW)) return;
 	const bool fighter = (q.flags & FIGHTER) != 0u;
 	const uint at = uint(s.y) * k_W;
 	uint was;
-	for (int x = s.xa; x <= s.xb; x++) {
+	for (int x = s.xa + lane; x <= s.xb; x += int(L)) {
 		const uint o = LD(owner, at + uint(x));
 		if (o > s.poly) continue;                 // a solid polygon (or line) drawn after it
 		const uint d = fighter ? LD(depth, at + uint(x)) : 0u;

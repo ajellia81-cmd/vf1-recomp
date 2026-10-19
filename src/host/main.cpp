@@ -28,6 +28,7 @@
 #endif
 #include <string>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <optional>
 #include <tuple>
@@ -35,7 +36,15 @@
 #include <map>
 #include <vector>
 #include <set>
+#include <cerrno>
 #include <cstring>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
+#ifdef __APPLE__
+#include <pthread.h>
+#endif
 
 // Every message box goes through here: a test run (VF_HIDDEN) never shows one (nor a file picker),
 // the message goes to stderr (log.txt without a console) instead.
@@ -350,12 +359,18 @@ struct settings
 	int scale = 2, aspect = 0, volume = 100, music = 100, effects = 100, aa = 1, filter = 0, ring = 0;
 	int renderer3d = 2;     // the 3D's renderer: 0 the CPU, 1 the GPU, 2 Auto (whichever is quicker here)
 	int akira_slot = 0;     // Cheats: who plays in Akira's place (model1::UNUSED_CHARACTERS; 0 Akira)
+	bool random_cpu = false;   // Cheats: with Random fighter, the computer's every opponent a random fighter too
+	int random_fighter = 0;   // (Cheats: any random fighter, a player's or the computer's: over akira_slot; from random_player and random_cpu)
+	std::string random_player[2];   // Cheats: each player's fighter: "" the select as ever, "*" a random one each game, or a name's (model1::set_random_player)
+	std::string random_named[2];    // (each player's last name typed: Left / Right come back to it)
+	void random_now() { random_fighter = !random_player[0].empty() || !random_player[1].empty() || random_cpu; }
 	int infinite_energy = 0;   // Cheats: bit 0 player 1, bit 1 player 2
-	bool one_hit_ko = false, no_time_limit = false;   // Cheats
+	bool one_hit_ko = false, no_time_limit = false, kage_unmasked = false;   // Cheats
 	int ring_cheat = 0;     // Cheats: 0 the arcade's, 1 tiny (600), 2 huge (5000: no ring outs)
 	int ring_now() const { return ring_cheat == 1 ? 600 : ring_cheat == 2 ? 5000 : ring; }
 	std::string auto_3d;    // Auto's findings, per render scale and antialiasing ("3x1:g,2x0:c")
 	int arcade_coin = -1;   // Arcade mode's coin/credit setting, kept while PC mode makes it free play (-1: not seen yet)
+	bool english_set = false;   // (the game's language made English once, its first start here: Japanese after is the player's choice)
 	std::string roms_folder;   // where the player keeps vf.zip (roms_folder = ...; read before the game starts, kept as written)
 	bool fullscreen = false, timings = false, arcade = false, smooth_bg = false, show_fps = false;
 	player_controls ctl[2] = { player_controls::defaults(0), player_controls::defaults(1) };
@@ -391,11 +406,29 @@ struct settings
 		num("arcade_coins", arcade_coin, -1, 0xffff);
 		num("renderer_3d", renderer3d, 0, 2);
 		num("akira_slot", akira_slot, 0, int(std::size(model1::UNUSED_CHARACTERS)) - 1);
+		num("random_fighter", random_fighter, 0, 2);   // (0 off, else on: 2 was "Looks + moves", now what on is)
+		flag("random_opponents", random_cpu);
 		num("infinite_energy", infinite_energy, 0, 3);
 		flag("one_hit_ko", one_hit_ko);
 		flag("no_time_limit", no_time_limit);
+		flag("kage_unmasked", kage_unmasked);
+		flag("english_set", english_set);
 		num("ring_cheat", ring_cheat, 0, 2);
 		if (auto it = kv.find("auto_3d"); it != kv.end()) auto_3d = it->second;
+		auto trimmed = [](std::string v) { while (!v.empty() && isspace(uint8_t(v.back()))) v.pop_back(); return v; };   // (a value edited by hand: "* ")
+		for (int p = 0; p < 2; p++)
+			if (auto it = kv.find(p ? "random_p2_name" : "random_p1_name"); it != kv.end()) random_named[p] = trimmed(it->second);
+		for (int p = 0; p < 2; p++)
+			if (auto it = kv.find(p ? "random_p2" : "random_p1"); it != kv.end()) random_player[p] = trimmed(it->second);
+			else if (random_fighter) random_player[p] = "*";   // (from before: Random fighter on, both players)
+		if (auto it = kv.find("random_name"); it != kv.end() && random_fighter && kv.find("random_p1") == kv.end())
+			random_player[0] = random_player[1] = trimmed(it->second);   // (from before: one name for both)
+		for (int p = 0; p < 2; p++)   // (a seed played, its name kept for the menu's Seed row too)
+			if (random_named[p].empty() && !random_player[p].empty() && random_player[p] != "*" && random_player[p][0] != '#') random_named[p] = random_player[p];
+		// (from before: Secret character, for anyone at Akira's place: player 1's fighter now)
+		if (akira_slot > 0 && random_player[0].empty() && kv.find("random_p1") == kv.end()) random_player[0] = "#" + std::to_string(akira_slot);
+		akira_slot = 0;
+		random_now();
 		if (auto it = kv.find("roms_folder"); it != kv.end()) roms_folder = it->second;
 		for (int p = 0; p < 2; p++) ctl[p].load(kv, p);
 		// settings from before the Menu button: Arcade mode's View tapped was a coin. It stays one
@@ -409,11 +442,19 @@ struct settings
 				}
 	}
 
-	void save(const std::string &path) const
+	// False if it couldn't be written (the caller keeps it to save again; said once in the log)
+	bool save(const std::string &path) const
 	{
 		const std::string tmp = path + ".tmp";
+		std::error_code ec;
+		if (const auto dir = std::filesystem::path(path).parent_path(); !dir.empty()) std::filesystem::create_directories(dir, ec);
 		FILE *f = fopen(tmp.c_str(), "w");
-		if (!f) return;
+		static bool said = false;
+		if (!f) {
+			if (!said) fprintf(stderr, "couldn't save the settings to %s: %s\n", path.c_str(), strerror(errno));
+			said = true;
+			return false;
+		}
 		fprintf(f, "# Virtua Fighter settings (the in-game menu writes these)\n");
 		fprintf(f, "scale = %d\npicture_shape = %d\nfullscreen = %d\nframe_timings = %d\nvolume = %d\narcade_mode = %d\n"
 				"background_filter = %d\nmusic_volume = %d\neffects_volume = %d\nantialiasing = %d\nshow_fps = %d\nscreen_filter = %d\nring_size = %d\n", scale, aspect,
@@ -421,16 +462,26 @@ struct settings
 		if (arcade_coin >= 0) fprintf(f, "arcade_coins = %d\n", arcade_coin);
 		fprintf(f, "renderer_3d = %d\n", renderer3d);
 		if (akira_slot) fprintf(f, "akira_slot = %d\n", akira_slot);
+		for (int p = 0; p < 2; p++) {
+			if (!random_player[p].empty()) fprintf(f, "random_p%d = %s\n", p + 1, random_player[p].c_str());
+			if (!random_named[p].empty()) fprintf(f, "random_p%d_name = %s\n", p + 1, random_named[p].c_str());
+		}
+		if (random_cpu) fprintf(f, "random_opponents = 1\n");
 		if (infinite_energy) fprintf(f, "infinite_energy = %d\n", infinite_energy);
 		if (one_hit_ko) fprintf(f, "one_hit_ko = 1\n");
 		if (no_time_limit) fprintf(f, "no_time_limit = 1\n");
+		if (kage_unmasked) fprintf(f, "kage_unmasked = 1\n");
+		if (english_set) fprintf(f, "english_set = 1\n");
 		if (ring_cheat) fprintf(f, "ring_cheat = %d\n", ring_cheat);
 		if (!auto_3d.empty()) fprintf(f, "auto_3d = %s\n", auto_3d.c_str());
 		if (!roms_folder.empty()) fprintf(f, "roms_folder = %s\n", roms_folder.c_str());
 		for (int p = 0; p < 2; p++) ctl[p].save(f, p);
 		const bool flushed = flush_to_disk(f);
-		if (fclose(f) == 0 && flushed) replace_file(path, tmp);
-		else { std::error_code ec; std::filesystem::remove(tmp, ec); }
+		if (fclose(f) == 0 && flushed && replace_file(path, tmp)) return true;
+		std::filesystem::remove(tmp, ec);
+		if (!said) fprintf(stderr, "couldn't save the settings to %s\n", path.c_str());
+		said = true;
+		return false;
 	}
 };
 
@@ -505,10 +556,20 @@ bool first_launch(const std::string &data, const std::string &keep, const std::s
 			if (!(have = zips_in(own)).empty()) fprintf(stderr, "the game from %s\n", own.string().c_str());
 		} else fprintf(stderr, "the game from the ROM folder %s\n", roms.string().c_str());
 	}
+	// where a picked set goes: the ROM folder, but never over the player's own set there (one that
+	// failed the check goes on failing; the picked one in the data folder's roms, looked in next time)
+	fs::path dest = roms;
 	if (!have.empty()) {
 		romset::result r = romset::load(have);
 		if (r.ok) { keep_copy(); out = std::move(r.regions); return true; }
 		problem = r.error + "\n\n";
+		if (!folder.empty() && fs::path(have[0]).parent_path() == roms) {
+			dest = own;
+			if (std::vector<std::string> o = zips_in(own); !o.empty()) {
+				romset::result r2 = romset::load(o);
+				if (r2.ok) { fprintf(stderr, "the ROM folder's set: %s; the game from %s\n", r.error.c_str(), own.string().c_str()); out = std::move(r2.regions); return true; }
+			}
+		}
 	} else if (kept != roms) {
 		// an update in a new folder: the set kept from before
 		std::vector<std::string> before = zips_in(kept);
@@ -520,24 +581,25 @@ bool first_launch(const std::string &data, const std::string &keep, const std::s
 	}
 	if (getenv("VF_HIDDEN")) { fprintf(stderr, "%sno game found in %s (hidden: no picker)\n", problem.c_str(), roms.string().c_str()); return false; }   // testing
 	SDL_Init(SDL_INIT_VIDEO);
-	const std::string where = "It's copied into " + roms.string() + ", so you only do this once.";
+	const std::string where = "It's copied into " + dest.string() + ", so you only do this once.";
 	std::string note = problem + "Choose your copy of Virtua Fighter: MAME's \"vf\" set (vf.zip).\n\n" + where;
 	for (;;) {
 		if (!message_box(SDL_MESSAGEBOX_INFORMATION, "Virtua Fighter", note)) return false;
-		struct pick { bool done = false, failed = false; std::vector<std::string> files; } chosen;
+		// (SDL may answer on another thread: done is set last, released, so failed and files are seen)
+		struct pick { std::atomic<bool> done{ false }; bool failed = false; std::vector<std::string> files; } chosen;
 		static const SDL_DialogFileFilter filters[] = { { "MAME ROM sets (zip)", "zip" } };
 		SDL_ShowOpenFileDialog([](void *ud, const char *const *list, int) {
 			auto *c = static_cast<pick *>(ud);
 			if (!list) c->failed = true;                  // no picker here (e.g. Steam Deck Game Mode)
 			else for (; *list; list++) c->files.push_back(*list);
-			c->done = true;
+			c->done.store(true, std::memory_order_release);
 		}, &chosen, nullptr, filters, 1, nullptr, false);
-		while (!chosen.done) { SDL_Event e; while (SDL_PollEvent(&e)) {} SDL_Delay(10); }
+		while (!chosen.done.load(std::memory_order_acquire)) { SDL_Event e; while (SDL_PollEvent(&e)) {} SDL_Delay(10); }
 		if (chosen.failed) {
 			const std::string msg = "There's no file picker here. Put your vf.zip in this folder, then start the game again:\n\n"
-									+ roms.string();
+									+ dest.string();
 			std::error_code ec;
-			fs::create_directories(roms, ec);
+			fs::create_directories(dest, ec);
 			message_box(SDL_MESSAGEBOX_INFORMATION, "Virtua Fighter", msg);
 			return false;
 		}
@@ -548,15 +610,15 @@ bool first_launch(const std::string &data, const std::string &keep, const std::s
 			continue;
 		}
 		std::error_code ec;
-		fs::create_directories(roms, ec);
+		fs::create_directories(dest, ec);
 		std::string why;
-		if (!copy_whole(f, roms / "vf.zip", why)) {
-			note = "Couldn't copy it into " + roms.string() + ": " + why + "\n\nChoose your vf.zip.";
+		if (!copy_whole(f, dest / "vf.zip", why)) {
+			note = "Couldn't copy it into " + dest.string() + ": " + why + "\n\nChoose your vf.zip.";
 			continue;
 		}
 		const fs::path io = fs::path(f).parent_path() / "model1io.zip";    // its neighbour, if any
-		if (fs::exists(io, ec)) copy_whole(io, roms / "model1io.zip", why);
-		romset::result r = romset::load(zips_here());
+		if (fs::exists(io, ec)) copy_whole(io, dest / "model1io.zip", why);
+		romset::result r = romset::load(zips_in(dest));
 		if (r.ok) { keep_copy(); out = std::move(r.regions); return true; }
 		note = r.error + "\n\nChoose MAME's \"vf\" set (vf.zip).";
 	}
@@ -637,6 +699,11 @@ std::string find_assets()
 
 int main(int argc, char **argv)
 {
+#ifdef __APPLE__
+	// the game, its drawing and its sound on the performance cores: without it an M-series Mac can put
+	// them on the efficiency cores (VF3's d5b1992)
+	pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
 	// test runs (VF_HIDDEN): a background process on macOS, so no Dock icon appears for each one
 	if (getenv("VF_HIDDEN")) SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
 	std::string dir = "build/vf";
@@ -771,6 +838,21 @@ int main(int argc, char **argv)
 		ee_path = dir + (m.real_ioboard() ? "/eeprom_93c46.sav" : "/eeprom.sav");
 	load_blob(nv_path, m.nvram().data(), m.nvram().size());
 	load_blob(ee_path, m.eeprom(), model1::EEPROM_SIZE);
+	// the ranking's names for random fighters and secret characters (model1::ranking_frame), beside the backup
+	const std::string rank_path = dir + "/ranking_names.txt";
+	if (FILE *f = fopen(rank_path.c_str(), "rb")) {
+		std::string text;
+		char buf[4096];
+		for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+		fclose(f);
+		m.set_ranking_names(text);
+	}
+	uint32_t rank_saved = m.ranking_names_version();
+	auto save_rank_names = [&] {
+		if (m.ranking_names_version() == rank_saved) return;
+		const std::string text = m.ranking_names();
+		if (save_blob(rank_path, reinterpret_cast<const uint8_t *>(text.data()), text.size())) rank_saved = m.ranking_names_version();
+	};
 	// the backup as loaded: the autosave in the loop writes it once it differs (free play set at
 	// boot, the game's first settings, an arcade setting changed in the first seconds)
 	auto backup_hash = [&] {
@@ -782,6 +864,7 @@ int main(int argc, char **argv)
 	uint64_t saved_hash = backup_hash();
 	if (!interp) m.run_cpu = [](int n) { rec::run(n); };
 	m.set_no_time_limit(cfg.no_time_limit);   // (Cheats: an instruction of the game's, so before it's recompiled)
+	m.set_strands_moved(cfg.random_fighter > 0);   // (Random fighter's hair: the same)
 #ifdef VF_NATIVE
 	// The game's code, recompiled to native code from this ROM, now (tens of milliseconds); the
 	// address map says where the code is. Without it the game runs on the interpreter.
@@ -827,9 +910,26 @@ int main(int argc, char **argv)
 	load_backgrounds(m, find_assets() + "/backgrounds");   // the title and select's widescreen sides
 	load_backgrounds(m, dir + "/backgrounds");   // the player's own (hi-res stage skies...), which win
 	m.set_ring_width(cfg.ring_now());
-	m.set_akira_slot(cfg.akira_slot);
+	m.set_kage_unmasked(cfg.kage_unmasked);
+	// (a player's Random fighter wins over Secret character: both are Akira's place; Random opponents alone doesn't)
+	auto akira_now = [&] { return 0; };   // (a secret character is a player's fighter now: Player 1 / 2 fighter)
+	// (Random fighter first: its records put back as VF has them, then the Secret character's
+	// changes to them, as its portrait head, kept)
+	auto apply_players = [&] {   // (each player's setting; a name no longer made: Random)
+		for (int p = 0; p < 2; p++)
+			if (!m.set_random_player(p, cfg.random_fighter ? cfg.random_player[p] : std::string())) {
+				// (a name no seed gives now: shown as Random, not as a Seed it can't play, the name gone)
+				if (cfg.random_named[p] == cfg.random_player[p]) cfg.random_named[p].clear();
+				cfg.random_player[p] = "*";
+				m.set_random_player(p, "*");
+				cfg_dirty = true;
+			}
+	};
+	apply_players();
+	m.set_random_fighter(cfg.random_fighter > 0, cfg.random_fighter > 0, cfg.random_cpu);
+	m.set_akira_slot(akira_now());
 	auto icon_dirs = [&] { return std::vector<std::string>{ dir + "/icons", find_assets() + "/icons" }; };   // (the player's first)
-	load_secret_icon(m, cfg.akira_slot, icon_dirs());
+	load_secret_icon(m, akira_now(), icon_dirs());
 	// The play style's coins: PC mode is free play (its FREE PLAY text hidden); Arcade mode has the
 	// cabinet's own coin setting, kept in settings.ini while PC mode has free play in its place (it
 	// was left at free play, so Arcade mode after PC mode had no credits to put in, and a cabinet's
@@ -849,10 +949,17 @@ int main(int argc, char **argv)
 		const int now = m.coin_setting();
 		if (!g_pc_mode && now >= 0 && now != cfg.arcade_coin) { cfg.arcade_coin = now; cfg_dirty = true; }
 	};
+	// The game's language English, once: the board comes set to Japanese (Arcade settings' Language
+	// changes it after; an install from before it, English the once too)
+	auto settle_language = [&]() -> bool {
+		if (cfg.english_set || m.assignment(model1::game_assignment::language) < 0) return false;   // (the game's very first boot writes the settings)
+		cfg.english_set = true; cfg_dirty = true;
+		return m.set_assignment(model1::game_assignment::language, 1);
+	};
 	auto apply_play_style = [&] { if (g_pc_mode) m.hide_free_play_text(); else m.show_free_play_text(); };
 	apply_play_style();
 	boot();
-	if (settle_coins()) boot();
+	if (const bool coins = settle_coins(), language = settle_language(); coins || language) boot();   // (both, each its own)
 
 	// Video is a must (with a message if it fails: a player's build has no console); sound and
 	// pads aren't: without a sound device the game keeps time by the clock.
@@ -1020,7 +1127,11 @@ int main(int argc, char **argv)
 		}
 #endif
 		if (gpu_2d) fprintf(stderr, "pictures put together on the GPU (renderer: %s)\n", rname ? rname : "?");
-		else fprintf(stderr, "pictures drawn on the CPU (renderer: %s; %s)\n", rname ? rname : "?", why.c_str());
+		// Low's edges smoothed there too (SDL's gpu renderer): the 3D then goes straight into its
+		// texture with Low as without, nothing back to the CPU (vf1-recomp #16: an RTX 5080 at 6x,
+		// Low, its 3D read back each picture for the CPU's smoothing, held at 60)
+		if (!gpu_2d) fprintf(stderr, "pictures drawn on the CPU (renderer: %s; %s)\n", rname ? rname : "?", why.c_str());
+		else if (gc.init_edge()) { m.set_gpu_edge(true); fprintf(stderr, "Low antialiasing's edges smoothed on the GPU\n"); }
 	}
 	// The 3D on the GPU (src/gpu/gpu3d.h, Display > 3D renderer): on the device SDL's Metal renderer
 	// draws with; off the Mac SDL_GPU's (Direct3D 12 or Vulkan): the device of SDL's "gpu" renderer
@@ -1075,17 +1186,10 @@ int main(int argc, char **argv)
 		m.m_gpu3d_verify = getenv("VF_G3_NO_VERIFY") ? 0 : 3;   // (the game's pictures: three checked against the CPU's)
 #endif
 	}
-	// Auto: the GPU, unless clearly slower with the frame at risk (auto_gpu below). Measured before the first picture, unseen (a made-up fight's worth of polygons, a few
-	// times each way), and again whenever the scale or antialiasing changes; then checked on the
-	// game's own pictures every 10 s, four pictures drawn the other way (the first not counted) (the two ways' pictures are
-	// the same pixels, so a switch shows nothing). What it found is kept in settings.ini per scale
-	// and antialiasing, the start's guess until it has measured. Any GPU error: the CPU for the run.
+	// Auto: the GPU whenever its test picture passes (the CPU only after a GPU error, for the run).
 	struct auto3d_state {
 		bool gpu = false;              // the GPU in use (Auto's choice, or GPU)
 		bool broken = false;           // a GPU error: the CPU for the run
-		std::vector<double> c, g;      // the last pictures' times each way (ms)
-		int probe = 0;                 // pictures still to draw the other way
-		uint64_t next = 0;             // the next check (ns)
 		uint64_t failed = 0;
 		bool tested = false;           // SDL_GPU: its test picture checked against the CPU's
 	} a3;
@@ -1102,25 +1206,6 @@ int main(int argc, char **argv)
 			i = j + 1;
 		}
 		cfg.auto_3d = out + (out.empty() ? "" : ",") + k + (gpu ? "g" : "c");
-	};
-	auto auto_recalled = [&]() -> int {   // -1 none, 0 the CPU, 1 the GPU
-		const std::string k = auto_key() + ":";
-		const size_t at = ("," + cfg.auto_3d).find("," + k);
-		if (at == std::string::npos) return -1;
-		const size_t v = at + k.size();
-		return v < cfg.auto_3d.size() ? (cfg.auto_3d[v] == 'g') : -1;
-	};
-	// Auto prefers the GPU: the CPU only when the GPU is clearly slower in a way that matters, over
-	// 1.5x the CPU's time and over half a frame (8 ms of the 16.7), so the frame's time is at risk
-	// (a GPU a little slower than a fast Mac's CPU, well inside the frame, is still the GPU). Back
-	// to the GPU once it's within 1.3x or under 6 ms.
-	// Into the renderer's textures (g3_shared), nothing waits for the GPU: it draws alongside the CPU,
-	// and costs a frame only near a whole one (VF2's rule, vf2-recomp #10): the CPU only over 14 ms
-	// and well behind it. (The measure itself still waits for the GPU's picture to come back: an
-	// overestimate here.)
-	auto auto_gpu = [&](bool was, double c, double g) {
-		if (g3_shared && m.gpu3d_target()) return was ? !(g > 1.5 * c && g > 14.0) : (g <= 1.3 * c || g < 12.0);
-		return was ? !(g > 1.5 * c && g > 8.0) : (g <= 1.3 * c || g < 6.0);
 	};
 	auto apply_3d = [&] { m.set_gpu3d_on(g3 && !a3.broken && a3.gpu); m.m_gpu3d_chosen = cfg.renderer3d == 1; };
 	auto renderer_name = [&]() -> std::string {
@@ -1184,22 +1269,15 @@ int main(int argc, char **argv)
 			fprintf(stderr, "3D renderer: the player's setting (%s): the %s\n", why, a3.gpu ? "GPU" : "CPU");
 			return;
 		}
-		const int recalled = auto_recalled();
-		const uint64_t t0 = SDL_GetTicksNS();
-		double c = 0, g = 0;
-		if (!m.bench3d(5, c, g)) {
-			a3.broken = true;
-			fprintf(stderr, "3D renderer: Auto: the GPU failed its measure: the CPU for this run\n");
-		} else {
-			if (const char *k = getenv("GPU3D_SLOW_MS")) g += atof(k);   // tests: a slow GPU (each picture this much longer)
-			a3.gpu = auto_gpu(true, c, g);
-			auto_remember(a3.gpu);
-			fprintf(stderr, "3D renderer: Auto (%s) at %dx, antialiasing %d: the CPU %.2f ms, the GPU %.2f ms a picture: the %s (%.0f ms measuring; last time: %s)\n",
-					why, cfg.scale, cfg.aa, c, g, a3.gpu ? "GPU" : "CPU", (SDL_GetTicksNS() - t0) / 1e6,
-					recalled < 0 ? "none" : recalled ? "the GPU" : "the CPU");
-		}
-		a3.c.clear(); a3.g.clear(); a3.probe = 0;
-		a3.next = SDL_GetTicksNS() + 10000000000ull;
+		// Auto: the GPU, whenever it works (its test picture passed; any error later, the CPU for the
+		// run). Measuring the two at the start and every 10 s chose the CPU on fast processors at low
+		// scales (the GPU's measure waited for its picture to come back: an overestimate), and each
+		// check drew four of the game's pictures on the CPU at the full size: a hitch at high scales
+		// (a GPU drawn on the CPU, as in a virtual machine or a container: several times slower than the
+		// CPU's own drawing, the CPU; as VF2's Auto)
+		a3.gpu = !g3->software();
+		auto_remember(a3.gpu);
+		fprintf(stderr, "3D renderer: Auto (%s) at %dx, antialiasing %d: the %s\n", why, cfg.scale, cfg.aa, a3.gpu ? "GPU" : "CPU (its GPU is drawn on the CPU)");
 		apply_3d();
 	};
 	// after each picture: its time; Auto's checks
@@ -1234,35 +1312,13 @@ int main(int argc, char **argv)
 				since = SDL_GetTicksNS(); sum[0] = sum[1] = gsum = rsum = 0; n[0] = n[1] = 0;
 			}
 		}
-		const double ms = st.ms + (st.gpu ? std::max(0.0, getenv("GPU3D_SLOW_MS") ? atof(getenv("GPU3D_SLOW_MS")) : 0.0) : 0.0);
-		auto &v = st.gpu ? a3.g : a3.c;
-		if (a3.probe != 4) {   // (a check's first picture the other way is left out: a GPU idle a while is slow to wake)
-			v.push_back(ms);
-			if (v.size() > 9) v.erase(v.begin());
-		}
-		if (cfg.renderer3d != 2 || a3.broken) return;
-		if (a3.probe > 0) {
-			if (--a3.probe == 0) {
-				auto med = [](std::vector<double> x) { std::sort(x.begin(), x.end()); return x[x.size() / 2]; };
-				const bool was = a3.gpu;
-				if (!a3.c.empty() && !a3.g.empty()) {
-					const double c = med(a3.c), g = med(a3.g);
-					a3.gpu = auto_gpu(was, c, g);   // (the GPU unless clearly slower and the frame at risk)
-					if (a3.gpu != was) {
-						auto_remember(a3.gpu);
-						fprintf(stderr, "3D renderer: Auto's check: the CPU %.2f ms, the GPU %.2f ms a picture: now the %s\n", c, g, a3.gpu ? "GPU" : "CPU");
-					} else if (getenv("VF_LOG_AUTO3D"))
-						fprintf(stderr, "3D renderer: Auto's check: the CPU %.2f ms, the GPU %.2f ms a picture: the %s still\n", c, g, a3.gpu ? "GPU" : "CPU");
-				}
-				a3.next = SDL_GetTicksNS() + 10000000000ull;
-			}
-			m.set_gpu3d_on(a3.probe > 0 ? !a3.gpu : a3.gpu);
-			return;
-		}
-		if (SDL_GetTicksNS() >= a3.next) { a3.probe = 4; m.set_gpu3d_on(!a3.gpu); }
+		// (Auto doesn't check the CPU against the GPU as it plays: the GPU, see auto_measure)
 	};
 	auto_measure("the start");
 	std::set<int> gpu_failed;           // render scales the GPU couldn't put together (a part too large for it)
+	// the pictures put together on the GPU (with antialiasing too: gpu_compose::resolve averages them
+	// there, at_gpu_aa), or drawn whole by the CPU
+	auto on_gpu = [&] { return gpu_2d && !gpu_failed.count(m.render_scale()); };
 	int gpu_verified = 0;               // the game's own pictures checked so far (the 1st, 60th and 600th)
 	model1::gpu_parts parts;
 	// The 3D's textures on the renderer's device (gpu3d::draw_target's), wrapped as the renderer's
@@ -1476,24 +1532,13 @@ int main(int argc, char **argv)
 	bool running = true, paused = false, show_frame = true;
 	pad_state pstate[2];
 	// F9: timings in the title bar (and on stderr) every 120 frames; a frame has 17.4 ms
-	struct perf_stats { bool show = false; int frames = 0, starved = 0, held = 0; uint64_t emu = 0, emu_max = 0, present = 0, work = 0, shown = 0, since = SDL_GetTicksNS(); };
+	struct perf_stats { bool show = false; int frames = 0, starved = 0, held = 0, long_frame = 0, long_picture = 0, long_other = 0, ahead = 0; uint64_t emu = 0, emu_max = 0, present = 0, work = 0, shown = 0, since = SDL_GetTicksNS(); };
 	perf_stats perf{ cfg.timings || getenv("VF_PERF") != nullptr };
-	// The load governor (a CPU that can't keep up): when, for about 6 s, the pictures shown fall short
-	// of the screen's refresh while busy, the sound runs dry, or running the game, drawing and uploading
-	// (not the wait for the screen) take over 97% of the time: first draw no more than 60 smooth
-	// pictures a second (not one per refresh of a 120 or 144 Hz screen), then drop antialiasing, then
-	// the render scale a step. Nothing is judged in the first 10 s on show (the start is far busier
-	// than the rest: on a Steam Deck VF2's went from 3x to 1x then and stayed), and after 10 s of calm
-	// (all the pictures, busy under 55%) what it lowered goes back up a step towards the player's
-	// (not again in this run if that step is lowered once more). The player's own change starts it
-	// afresh. Not in tests (VF_GOVERN: in tests too; VF_TEST_LOAD=ms:s, each pass ms longer a frame
-	// at 3x, by the scale's square, for the first s seconds: a slow start).
-	int player_scale = -1, player_aa = -1;   // the player's own, while the governor has lowered them
-	uint64_t smooth_gap_ns = 8333333;    // smooth pictures: at most one per this, on average (120/s)
-	int over_windows = 0;
-	uint64_t gov_from = 0;                // judged from (10 s after the first picture)
-	int gov_calm = 0;                     // calm windows in a row
-	bool gov_raised = false, gov_no_raise = false;
+	// No load governor: the render scale and antialiasing are the player's, always, and a picture is
+	// made for every refresh of the screen, whatever its rate (it lowered them, or held 60 a second,
+	// on windows it judged short: false alarms on fast machines kept them lowered, vf1-recomp #16 #18)
+	uint64_t started_at = 0;              // (the first picture: the log's start)
+	constexpr uint64_t smooth_gap_ns = 8333333;   // (a screen's rate unknown, or hidden in tests: a picture each 1/120 s at most)
 	double test_load_ms = 0, test_load_s = 0;
 	if (const char *tl = getenv("VF_TEST_LOAD")) sscanf(tl, "%lf:%lf", &test_load_ms, &test_load_s);
 	// The render state in use, to the log: at the start and at each change (the player's or the governor's)
@@ -1506,9 +1551,8 @@ int main(int argc, char **argv)
 		const char *rn = SDL_GetRendererName(ren);
 		fprintf(stderr, "render state (%s): %dx (drawn at %dx), antialiasing %s, %s, the 3D: %s, the 2D on the %s (%s), smooth pictures %s, governor %s, vsync %d, screen %.2f Hz, window %d x %d\n",
 				why, cfg.scale, m.render_scale(), cfg.aa == 0 ? "Low" : aa_now() > 1 ? (aa_now() == 2 ? "2x" : "3x") : "off",
-				aspect_i ? ASPECT_NAMES[aspect_i] : "fit", renderer_name().c_str(), gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale()) ? "GPU" : "CPU",
-				rn ? rn : "?", smooth_gap_ns < 16666666 ? "each refresh" : "60 a second",
-				((!getenv("VF_HIDDEN") && !getenv("VF_QUIT_AFTER")) || getenv("VF_GOVERN")) ? "on" : "off", vsync, hz, pw, ph);
+				aspect_i ? ASPECT_NAMES[aspect_i] : "fit", renderer_name().c_str(), on_gpu() ? "GPU" : "CPU",
+				rn ? rn : "?", "each refresh", "none", vsync, hz, pw, ph);
 	};
 
 	// ---- the menu (Esc, or View on a pad) ----
@@ -1521,38 +1565,52 @@ int main(int argc, char **argv)
 	// Reset (the menu, F3): the menu closes, a paused game unpauses, and the screen goes black at
 	// once while the boot runs unseen (a few seconds on a slow machine), not the last picture held.
 	// the arcade settings as their page opened (and the ring): see arcade_page
-	std::optional<std::array<int, 9>> assign_before;
+	std::optional<std::array<int, 12>> assign_before;
 	auto reset_game = [&](bool keep_coins = true) {
 		assign_before.reset();   // a restart applies them
 		if (keep_coins) keep_arcade_coins();     // (Arcade: as the service menu may have left them)
 		menu.close();
 		paused = false;
+		// Cheats' fighters, as they are now (Random fighter is applied here, not as the menu changes it)
+		apply_players();
+		// the cheats' code patches, as they are now (every restart: the menu's Reset game and Play style
+		// too, not only a cheat changed); the game's code then new: recompiled before the reset
+		bool code = m.set_no_time_limit(cfg.no_time_limit);
+		code |= m.set_strands_moved(cfg.random_fighter > 0);
+#ifdef VF_NATIVE
+		if (code && !interp && !recompile()) {
+			// (the old native code would run on the new patches: the interpreter from now on, as at a start)
+			fprintf(stderr, "Couldn't recompile the game after the cheats' patches: running it on the slower interpreter instead.\n");
+			rec::detach(m.cpu());
+			interp = true;
+			m.run_cpu = nullptr;
+		}
+#else
+		(void)code;
+#endif
+		m.set_random_fighter(cfg.random_fighter > 0, cfg.random_fighter > 0, cfg.random_cpu);   // (first: see above)
+		m.set_akira_slot(akira_now());
+		load_secret_icon(m, akira_now(), icon_dirs());
 		SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
 		SDL_RenderClear(ren);
 		SDL_RenderPresent(ren);
 		boot();
-		if (settle_coins()) boot();   // (the service menu may have set coins)
+		if (const bool coins = settle_coins(), language = settle_language(); coins || language) boot();   // (the service menu may have set coins)
 		make_texture();
 		show_frame = false;
 	};
-	// the settings as the player chose them (not what the governor lowered them to for now)
-	auto save_settings = [&] {
-		settings out = cfg;
-		if (player_scale >= 0) { out.scale = player_scale; out.aa = player_aa; }
-		out.save(settings_path);
-	};
-	auto set_scale = [&](int v, bool by_player = true) {
+	auto save_settings = [&] { return cfg.save(settings_path); };
+	auto set_scale = [&](int v) {
 		cfg.scale = v; cfg_dirty = true;
-		// the player's own choice starts the governor afresh (its 60-a-second limit included)
-		if (by_player) { smooth_gap_ns = 8333333; over_windows = 0; player_scale = player_aa = -1; gov_calm = 0; gov_raised = gov_no_raise = false; }
 		m.set_render_scale(v * aa_fit(v, cfg.aa));
 		m.set_edge_aa(cfg.aa == 0);
 		m.set_smooth(true);
 		sync.reset();                          // a new picture size: show the next frame as it is
 		auto_measure("a new scale or antialiasing");
 		make_texture(); present_shape(); redraw_if_stopped();
-		log_state(by_player ? "the player's scale or antialiasing" : "the governor's");
+		log_state("the player's scale or antialiasing");
 	};
+	auto player_scale_to = [&](int v) { set_scale(v); };
 	auto set_shape = [&](int v) {
 		aspect_i = cfg.aspect = v; cfg_dirty = true;
 		sync.reset();
@@ -1569,9 +1627,9 @@ int main(int argc, char **argv)
 	auto display_page = [&] {
 		menu_page p{ "Display", "", {} };
 		p.items.push_back({ "Render scale",
-			"How sharp the 3D is. 1x is the original arcade resolution; higher is sharper but needs a faster computer. If yours can't keep up, the game lowers it for you. (F5)",
+			"How sharp the 3D is. 1x is the original arcade resolution; higher is sharper but needs a faster computer. (F5)",
 			[&] { return std::to_string(cfg.scale) + "x"; },
-			[&](int d) { set_scale(std::clamp(cfg.scale + d, 1, 6)); } });
+			[&](int d) { player_scale_to(std::clamp(cfg.scale + d, 1, 6)); } });
 		p.items.push_back({ "Antialiasing",
 			"Smooths jagged edges on the 3D. Low smooths the edges for little cost; 2x and 3x draw the 3D larger and look cleanest, but take a lot more power (lower the render scale if the game slows down).",
 			[&] { return cfg.aa == 0 ? std::string("Low") : aa_now() == 1 ? std::string(cfg.aa > 1 ? "Off (too large here)" : "Off") : std::to_string(aa_now()) + "x"; },
@@ -1583,7 +1641,7 @@ int main(int argc, char **argv)
 				set_scale(cfg.scale);
 			} });
 		p.items.push_back({ "3D renderer",
-			"Which draws the 3D: the CPU, or the graphics card (GPU), with exactly the same picture. Auto uses the GPU unless it is too slow on this computer, checking again as you play.",
+			"Which draws the 3D: the CPU, or the graphics card (GPU), with exactly the same picture. Auto uses the GPU whenever it works here (the CPU if it can't).",
 			[&] { return renderer_name(); },
 			[&](int d) {
 				if (!g3 && g3_next_start) { cfg.renderer3d = wrap(cfg.renderer3d + d, 3); cfg_dirty = true; return; }   // (SDL_GPU: from the next start)
@@ -1608,7 +1666,7 @@ int main(int argc, char **argv)
 		p.items.push_back({ "Show FPS", "Shows the frame rate in the top right corner.",
 			[&] { return on_off(cfg.show_fps); },
 			[&](int) { cfg.show_fps = !cfg.show_fps; cfg_dirty = true; if (!cfg.show_fps) menu.set_fps(""); } });
-		p.items.push_back({ "Fullscreen", "Play fullscreen or in a window. (F11)",
+		p.items.push_back({ "Fullscreen", "Play fullscreen or in a window. (F11, F or Alt+Enter)",
 			[&] { return on_off(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN); },
 			[&](int) { set_fullscreen(!(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); } });
 		p.items.push_back(back_item());
@@ -1657,15 +1715,17 @@ int main(int argc, char **argv)
 	// ---- the arcade's own settings (test mode's GAME ASSIGNMENTS): the game reads them as it starts,
 	// so closing the menu after changing one restarts it (only if something is different) ----
 	using ga = model1::game_assignment;
-	constexpr int N_ASSIGN = 5;
-	static_assert(std::tuple_size_v<decltype(assign_before)::value_type> == N_ASSIGN + 4);
+	constexpr int N_ASSIGN = 6;
+	static_assert(std::tuple_size_v<decltype(assign_before)::value_type> == N_ASSIGN + 6);
 	auto assignments_now = [&] {
-		std::array<int, N_ASSIGN + 4> v;
+		std::array<int, N_ASSIGN + 6> v;
 		for (int i = 0; i < N_ASSIGN; i++) v[i] = m.assignment(ga(i));
 		v[N_ASSIGN] = cfg.ring;
 		v[N_ASSIGN + 1] = cfg.akira_slot;   // (Cheats: read as a fight loads, so it restarts too)
 		v[N_ASSIGN + 2] = cfg.ring_cheat;
 		v[N_ASSIGN + 3] = cfg.no_time_limit;   // (an instruction of the game's: a restart recompiles it)
+		v[N_ASSIGN + 4] = (cfg.random_fighter != 0) * 2 + cfg.random_cpu;
+		v[N_ASSIGN + 5] = int(std::hash<std::string>{}(cfg.random_player[0] + "/" + cfg.random_player[1]));   // (each player's fighter)
 		return v;
 	};
 	auto arcade_page = [&] {
@@ -1674,8 +1734,15 @@ int main(int argc, char **argv)
 		auto choice = [&](const char *label, const char *help, ga a, std::function<std::string(int)> name) {
 			p.items.push_back({ label, help,
 				[&m, a, name] { int v = m.assignment(a); return v < 0 ? std::string("-") : name(v); },
-				[&m, a](int d) { int v = m.assignment(a); if (v >= 0) m.set_assignment(a, v + d); } });
+				[&m, &cfg, &cfg_dirty, a](int d) {
+					int v = m.assignment(a); if (v >= 0) m.set_assignment(a, v + d);
+					// (the player's language: English's once-only setting not to overrule it at the restart)
+					if (v >= 0 && a == ga::language && !cfg.english_set) cfg.english_set = true, cfg_dirty = true;
+				} });
 		};
+		static const char *LANGUAGES[] = { "Japanese", "English" };
+		choice("Language", "The game's own text, as the rules shown between demos: Japanese, as the arcade board comes set, or English.",
+			ga::language, [](int v) { return std::string(LANGUAGES[v]); });
 		static const char *DIFFICULTY[] = { "Easy", "Normal", "Hard", "Hardest" };
 		choice("Difficulty", "How hard the computer fights. Harder also gives both fighters less energy, and a smaller ring while Ring size is Default.",
 			ga::difficulty, [](int v) { return std::string(DIFFICULTY[v]); });
@@ -1701,21 +1768,131 @@ int main(int argc, char **argv)
 		return p;
 	};
 	// ---- cheats: the unused characters (in Akira's place) ----
-	auto cheats_page = [&] {
+	// Each player's fighter's row state: typing a seed in it, what was typed, a mistake; and where the
+	// page put the rows (to rebuild it with the same one selected)
+	struct seed_entry { bool typing = false, pending = false; std::string typed, error; int secret = 1; };   // (pending: Seed chosen, none typed yet: plays as Random)
+	std::shared_ptr<seed_entry> seed_st[2] = { std::make_shared<seed_entry>(), std::make_shared<seed_entry>() };
+	int fighter_row[2] = { 0, 0 }, fighter_sub[2] = { -1, -1 };
+	std::function<menu_page()> cheats_page;
+	// (out here: the rows' functions outlive the page's building)
+	auto kind_of = [&](int pl) { const std::string &v = cfg.random_player[pl]; return v.empty() ? 0 : v == "*" ? 1 : v[0] == '#' ? 3 : 2; };
+	static const char *KINDS[] = { "Normal", "Random", "Seed", "Secret character" };
+	// (the page made first: where a player's rows land depends on the rows above)
+	auto rebuild = [&](int pl, bool sub) { menu_page pg = cheats_page(); menu.replace(std::move(pg), sub && fighter_sub[pl] >= 0 ? fighter_sub[pl] : fighter_row[pl]); };
+	constexpr int N_SECRET = int(std::size(model1::UNUSED_CHARACTERS));
+	cheats_page = [&] {
 		if (!assign_before) assign_before = assignments_now();
-		menu_page p{ "Cheats: a change restarts the game when the menu closes", "", {} };
-		constexpr int N_CHARS = int(std::size(model1::UNUSED_CHARACTERS));
-		p.items.push_back({ "Secret character",
-			"A character cut from the game, in Akira's spot on the select screen (Akira is away while one is in). "
-			"Unfinished: borrowed moves, no throws. The Koskol brothers were to be the final bosses.",
-			[&] { return std::string(cfg.akira_slot ? model1::UNUSED_CHARACTERS[cfg.akira_slot] : "Off"); },
-			[&](int d) {
-				cfg.akira_slot = wrap(cfg.akira_slot + d, N_CHARS);
+		menu_page p{ "Cheats: most changes restart the game when the menu closes", "", {} };
+		auto heading = [&](const char *t) { menu_item h{ t, "", {}, {}, {}, true }; h.heading = true; p.items.push_back(h); };
+		heading("FIGHTERS");
+		// Each player's fighter (Normal, Random, Seed, Secret character), and under it, only when it
+		// needs one, a row of its own: the seed (typed right in it, a mistake said under it) or the
+		// secret character. Anything but Normal is picked for that player at the select
+		for (int pl = 0; pl < 2; pl++) {
+			auto st = seed_st[pl];
+			if (kind_of(pl) == 3) st->secret = std::clamp(atoi(cfg.random_player[pl].c_str() + 1), 1, N_SECRET - 1);
+			auto entry = std::make_shared<std::function<bool(const SDL_Event &)>>();
+			static const char *HINT = "Letters type   Backspace delete   Enter play it   Esc cancel   "
+									  "(a pad: Up / Down the letter, Right the next, Left delete, A play it, B cancel)";
+			auto set_kind = [&, pl](const std::string &v) { cfg.random_player[pl] = v; if (v != "" && v != "*" && v[0] != '#') cfg.random_named[pl] = v; cfg.random_now(); cfg_dirty = true; };
+			auto start_typing = [&, pl, st, entry] {
+				st->typing = true; st->typed.clear(); st->error.clear();
+				rebuild(pl, true);
+				menu.capture(HINT, *entry, [&, pl, st] { st->typing = false; st->error.clear(); rebuild(pl, false); });
+			};
+			*entry = [&, pl, st, set_kind](const SDL_Event &e) {
+				bool enter = false;
+				if (e.type == SDL_EVENT_KEY_DOWN) {
+					const SDL_Scancode sc = e.key.scancode;
+					SDL_Keycode k = e.key.key;   // (the letter on the key, the keyboard's layout: AZERTY's A is the scancode's Q)
+					if (k == SDLK_UNKNOWN && sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z) k = SDLK_A + (sc - SDL_SCANCODE_A);   // (none given: by its place)
+					if (k >= SDLK_A && k <= SDLK_Z) { if (st->typed.size() < 12) st->typed += char('A' + (k - SDLK_A)); }
+					else if (sc == SDL_SCANCODE_BACKSPACE) { if (!st->typed.empty()) st->typed.pop_back(); }
+					else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER) enter = true;
+					else return false;
+				} else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+					std::string &t = st->typed;
+					auto turn = [&](int d) { if (t.empty()) t.push_back('A'); else t.back() = char('A' + ((t.back() - 'A' + d) % 26 + 26) % 26); };
+					switch (e.gbutton.button) {
+					case SDL_GAMEPAD_BUTTON_EAST: st->typing = false; st->error.clear(); rebuild(pl, false); return true;   // (B: as it was)
+					case SDL_GAMEPAD_BUTTON_SOUTH: enter = true; break;
+					case SDL_GAMEPAD_BUTTON_DPAD_UP: turn(+1); break;
+					case SDL_GAMEPAD_BUTTON_DPAD_DOWN: turn(-1); break;
+					case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: if (t.size() < 12) t.push_back(t.empty() ? 'A' : t.back()); break;
+					case SDL_GAMEPAD_BUTTON_DPAD_LEFT: if (!t.empty()) t.pop_back(); break;
+					default: return false;
+					}
+				} else
+					return false;
+				st->error.clear();
+				if (enter) {
+					if (st->typed.empty()) st->error = "Type a seed: a random fighter's name, from its energy bar";
+					else if (!m.random_fighter_names().count(st->typed)) st->error = "No fighter has the seed " + st->typed;
+					else { set_kind(st->typed); st->typing = st->pending = false; rebuild(pl, true); return true; }
+				}
+				menu.refresh();
+				return false;
+			};
+			fighter_row[pl] = int(p.items.size());
+			p.items.push_back({ pl ? "Player 2 fighter" : "Player 1 fighter",
+				"Normal: pick at the select. Random: a new mixed fighter every game. Seed: one mixed fighter, the same build and "
+				"moves every game on any machine. Colours are new every game. Secret character: one cut from the game, or Dural. Anything but "
+				"Normal is picked for you at the select.",
+				[&, pl, st] { return std::string(KINDS[st->typing || st->pending ? 2 : kind_of(pl)]); },
+				[&, pl, st, set_kind, start_typing](int d) {
+					const int k = wrap((st->pending ? 2 : kind_of(pl)) + d, 4);
+					st->typing = st->pending = false; st->error.clear();
+					if (k == 0) set_kind("");
+					else if (k == 1) set_kind("*");
+					else if (k == 3) set_kind("#" + std::to_string(st->secret));
+					else if (!cfg.random_named[pl].empty() && m.random_fighter_names().count(cfg.random_named[pl])) set_kind(cfg.random_named[pl]);
+					else { st->pending = true; set_kind("*"); }   // (no seed yet: Random until one is typed in its row)
+					rebuild(pl, false);
+				},
+				{}, false,
+				[&, pl, st, set_kind] { st->typing = st->pending = false; set_kind(""); rebuild(pl, false); } });
+			fighter_sub[pl] = -1;
+			const int kind = st->typing || st->pending ? 2 : kind_of(pl);
+			if (kind == 2) {
+				fighter_sub[pl] = int(p.items.size());
+				menu_item it{ "Seed",
+					"A random fighter's name, from its energy bar: the same seed is the same build and moves on any machine, in new colours each game. Enter: type a new one.",
+					[&, pl, st] { return st->typing ? st->typed + "_" : st->pending ? std::string("Enter to type a seed (Random till then)") : cfg.random_player[pl]; },
+					{}, start_typing };
+				it.below = [st] { return st->typing ? st->error : std::string(); };
+				it.sub = true;
+				p.items.push_back(it);
+			} else if (kind == 3) {
+				fighter_sub[pl] = int(p.items.size());
+				static const char *ABOUT[] = { "",
+					"Siba (Majido): an Arabian fighter cut before release; his moves are mostly Lau's. Unfinished: borrowed moves, no throws.",
+					"Jeff: an early Jeffry, cut before release; his moves are Jacky's. Unfinished: borrowed moves, no throws.",
+					"Takeru: the early Akira, before he was renamed. Unfinished: borrowed moves, no throws.",
+					"Rekka: one of the Koskol brothers, meant as the final bosses. Unfinished: borrowed moves, no throws.",
+					"Score: one of the Koskol brothers, meant as the final bosses. Unfinished: borrowed moves, no throws.",
+					"Aeon: one of the Koskol brothers, meant as the final bosses. Unfinished: borrowed moves, no throws.",
+					"Dural: the final boss, playable." };
+				menu_item ch{ "Character", ABOUT[std::clamp(st->secret, 1, 7)],
+					[st] { return std::string(model1::UNUSED_CHARACTERS[std::clamp(st->secret, 1, int(std::size(model1::UNUSED_CHARACTERS)) - 1)]); },
+					[&, pl, st, set_kind](int d) {
+						st->secret = 1 + wrap(st->secret - 1 + d, N_SECRET - 1);
+						set_kind("#" + std::to_string(st->secret));
+						rebuild(pl, true);   // (its help: this character's)
+					} };
+				ch.sub = true;
+				p.items.push_back(ch);
+			}
+		}
+		p.items.push_back({ "Random opponents",
+			"Every computer opponent a random fighter, looks and moves, made afresh for each match.",
+			[&] { return on_off(cfg.random_cpu); },
+			[&](int) {
+				cfg.random_cpu = !cfg.random_cpu;   // (applied as the game restarts)
+				cfg.random_now();
 				cfg_dirty = true;
-				m.set_akira_slot(cfg.akira_slot);
-				load_secret_icon(m, cfg.akira_slot, icon_dirs());
 			} });
 		static const char *WHO[] = { "Off", "Player 1", "Player 2", "Both" };
+		heading("FIGHT");
 		p.items.push_back({ "Infinite energy", "Energy stays full: hits land but never knock out.",
 			[&] { return std::string(WHO[cfg.infinite_energy]); },
 			[&](int d) { cfg.infinite_energy = wrap(cfg.infinite_energy + d, 4); cfg_dirty = true; } });
@@ -1729,6 +1906,10 @@ int main(int argc, char **argv)
 		p.items.push_back({ "Ring", "Tiny is half the smallest ring: ring outs everywhere. Huge is far wider than the stage: no ring outs.",
 			[&] { return std::string(RING[cfg.ring_cheat]); },
 			[&](int d) { cfg.ring_cheat = wrap(cfg.ring_cheat + d, 3); cfg_dirty = true; m.set_ring_width(cfg.ring_now()); } });
+		heading("LOOKS");
+		p.items.push_back({ "Kage's mask", "Comes off: a hit that knocks Kage's hood back shows his face, as on a cabinet that's been played for nine hours. As the arcade: it stays on until this game has been played that long.",
+			[&] { return std::string(cfg.kage_unmasked ? "Comes off" : "As the arcade"); },
+			[&](int) { cfg.kage_unmasked = !cfg.kage_unmasked; cfg_dirty = true; m.set_kage_unmasked(cfg.kage_unmasked); } });
 		p.items.push_back(back_item());
 		return p;
 	};
@@ -1876,7 +2057,7 @@ int main(int argc, char **argv)
 		p.items.push_back({ "Arcade settings", "Difficulty, ring size, rounds, continues and the service menu. Changing them restarts the game.", {}, {},
 							[&] { menu.push(arcade_page()); } });
 		p.items.push_back({ "Controls", "Each player's controller, keys and buttons.", {}, {}, [&] { menu.push(controls_page()); } });
-		p.items.push_back({ "Cheats", "Play as the characters left unused in the game. Changing it restarts the game.", {}, {},
+		p.items.push_back({ "Cheats", "Secret characters, random fighters, Kage's mask and fight switches. Some restart the game.", {}, {},
 							[&] { menu.push(cheats_page()); } });
 		p.items.push_back({ "Quit", "Saves and closes the game.", {}, {}, [&] { running = false; } });
 		return p;
@@ -1912,12 +2093,116 @@ int main(int argc, char **argv)
 	struct trace_pass { char kind = 'S'; int due = 0; double now = -1; uint64_t emu = 0, draw = 0, compose = 0, upload = 0, present = 0; } tp;
 	const uint64_t trace_t0 = SDL_GetTicksNS();
 	if (trace) fprintf(trace, "# pass t_ms due frame emu draw compose upload present kind now hold tiles_full tiles_ms layers layers_ms sky_build sky_build_ms sky_scale sky_scale_ms padded tex_made up_kpx stopped hp1 hp2 replay live r1 r2 quads mode alpha list0 list1 px py pz edge_ms\n");
+	// The game on a thread of its own while the screen waits (from VF3, 7647ac6): a frame that will be
+	// due by the next refresh is run during the present's wait for vsync, its inputs read as it starts;
+	// what follows it (the hold, its sound) as the present returns. Only with smooth motion, whose
+	// pictures are drawn when shown, on this thread: the frame draws nothing. VF_NO_GAME_THREAD=1: off.
+	struct game_thread {
+		std::mutex mu;
+		std::condition_variable cv;
+		std::function<void()> job;
+		bool busy = false, quit = false;
+		std::thread th;
+		void start(std::function<void()> f) { { std::lock_guard<std::mutex> l(mu); job = std::move(f); busy = true; } cv.notify_all(); }
+		void wait() { std::unique_lock<std::mutex> l(mu); cv.wait(l, [&] { return !busy; }); }
+		game_thread() : th([this] {
+#ifdef __APPLE__
+			pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);   // (not the efficiency cores)
+#endif
+			std::unique_lock<std::mutex> l(mu);
+			for (;;) {
+				cv.wait(l, [&] { return busy || quit; });
+				if (quit) return;
+				auto f = std::move(job);
+				l.unlock();
+				f();
+				l.lock();
+				busy = false;
+				cv.notify_all();
+			}
+		}) {}
+		~game_thread() { { std::lock_guard<std::mutex> l(mu); quit = true; } cv.notify_all(); th.join(); }
+	};
+	static const bool no_game_thread = getenv("VF_NO_GAME_THREAD") != nullptr;
+	game_thread gt;
+	bool carried_curtain = false;      // (a curtain from the frame run during the last present)
+	bool carried_on_gpu = false;       // (... and put together by the GPU)
+	double screen_hz_now = 0;          // (the screen's Hz, looked up each second)
+	// A game frame's inputs (false: a hotkey opened the menu, no frame runs) and what follows one: the
+	// scene changes' hold, its sound
+	auto frame_inputs = [&]() -> bool {
+		switch (read_inputs(m, pads, pstate, cfg.ctl)) {
+		case hotkey::menu: open_menu(); break;
+		case hotkey::scale: player_scale_to(cfg.scale % 4 + 1); break;
+		case hotkey::aspect: set_shape((aspect_i + 1) % N_ASPECTS); break;
+		case hotkey::none: break;
+		}
+		if (menu.is_open()) return false;
+		if (cfg.infinite_energy || cfg.one_hit_ko || cfg.no_time_limit) m.fight_cheats(cfg.infinite_energy, cfg.one_hit_ko, cfg.no_time_limit);
+		return true;
+	};
+	bool curtain_on_gpu = false;       // a curtain shown during a hold, put together by the GPU
+	auto after_frame = [&](bool ff) -> bool {
+				game_run++;
+				// leaving the service menu: the PC build restarts at once, past the boot screen
+				if (g_left_test_menu) { g_left_test_menu = false; if (g_pc_mode) { reset_game(); m.m_audio_out.clear(); return false; } }
+				// With smooth motion a frame is only drawn when shown: while a scene change is held,
+				// draw it anyway so the hold sees the real picture (else it waits on black forever),
+				// though it isn't shown
+				// (in parts when the GPU puts the pictures together: only the 3D drawn at the render scale)
+				bool probe_parts = false;
+				if (m.smooth() && sync.holding()) {
+					if (on_gpu()) {
+						g3_prepare();
+						probe_parts = m.render_parts(double(m.frame_number()), parts, false) == 1;
+					}
+					else m.render_smooth(double(m.frame_number()), false);
+				}
+				const bool was_holding = sync.holding();
+				const bool show_it = sync.show(m);
+				// a curtain shown while the hold goes on: frame() as just drawn, or that picture put
+				// together by the GPU
+				if (show_it) {
+					curtain = sync.holding();
+					curtain_on_gpu = probe_parts && sync.holding() &&
+									 gc.draw(parts, m.frame_w(), m.frame_h(), m.render_scale() > 1 ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST) &&
+									 (aa_now() == 1 || gc.resolve(aa_now(), shown_w(), shown_h()));
+				}
+				show_frame = show_it || show_frame;
+				// a new scene: nothing to blend from, unless both lists kept are its own (it was built
+				// after frames with no 3D, which forget the old scene's): then it moves from its first
+				// picture on, instead of standing still until a third list came
+				static uint64_t hold_from = 0;
+				if (!was_holding && sync.holding()) hold_from = m.frame_number();
+				if (was_holding && !sync.holding()) {
+					float sa; int older, newer;
+					m.smooth_state(sa, older, newer);
+					if (older < 0 || uint64_t(older) + 1 < hold_from) m.smooth_cut();
+				}
+				if (audio && !ff) {
+					if (SDL_GetAudioStreamQueued(audio) == 0) perf.starved++;   // the sound ran dry: a crackle
+					SDL_PutAudioStreamData(audio, m.m_audio_out.data(), int(m.m_audio_out.size() * 2));
+				}
+				m.m_audio_out.clear();
+				return true;
+	};
+	// Fullscreen: F11, Alt+Enter, or F (F only while no player has it as a control; the menu takes
+	// keys first, so a seed typed there isn't one)
+	auto fullscreen_key = [&](const SDL_KeyboardEvent &k) {
+		if (k.scancode == SDL_SCANCODE_RETURN && (k.mod & SDL_KMOD_ALT)) return true;
+		if (k.scancode != SDL_SCANCODE_F || (k.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI))) return false;
+		for (const auto &c : cfg.ctl)
+			for (SDL_Scancode s : c.key) if (s == SDL_SCANCODE_F) return false;
+		return true;
+	};
 	while (running) {
-		if (!gov_from) { gov_from = SDL_GetTicksNS() + 10000000000ull; log_state("the start"); }
+		if (!started_at) { started_at = SDL_GetTicksNS(); log_state("the start"); }
 		bool in_texture = false;           // this pass's picture is on the GPU already (or the last one stays)
-		curtain = false;
+		curtain = carried_curtain;
+		carried_curtain = false;
 		bool cut_hold = false;             // this pass's picture stays on purpose (a camera cut's hold)
-		bool curtain_on_gpu = false;       // a curtain shown during a hold, put together by the GPU
+		curtain_on_gpu = carried_on_gpu;
+		carried_on_gpu = false;
 		const uint64_t pass_t = SDL_GetTicksNS();
 		tp = trace_pass{};
 		const int64_t pass = frames_run++;   // counted in every run: VF_MENU_KEYS and VF_SHOT_AT work without VF_QUIT_AFTER
@@ -1936,6 +2221,7 @@ int main(int argc, char **argv)
 				SDL_Event k{};
 				k.type = SDL_EVENT_KEY_DOWN;
 				k.key.scancode = sc;
+				k.key.key = SDL_GetKeyFromScancode(sc, SDL_KMOD_NONE, true);   // (as a keyboard's: the seed's letters read it)
 				k.key.down = true;
 				SDL_PushEvent(&k);
 			}
@@ -1984,6 +2270,10 @@ int main(int argc, char **argv)
 				}
 				upload();
 			}
+			// (F11 and Alt+Enter with the menu open too, unless it's waiting for a key: Alt+Enter was its Enter)
+			else if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && menu.is_open() && !menu.capturing()
+					 && (e.key.scancode == SDL_SCANCODE_F11 || (e.key.scancode == SDL_SCANCODE_RETURN && (e.key.mod & SDL_KMOD_ALT))))
+				set_fullscreen(!(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN));
 			else if (menu.handle_event(e)) continue;
 			else if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED) open_pads();
 			else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && ASPECTS[aspect_i] <= 0) {
@@ -2000,7 +2290,7 @@ int main(int argc, char **argv)
 				else if (e.key.scancode == SDL_SCANCODE_P) paused = !paused;
 				else if (e.key.scancode == SDL_SCANCODE_F9) { perf.show = cfg.timings = !perf.show; cfg_dirty = true; if (!perf.show) present_shape(); }
 				else if (e.key.scancode == SDL_SCANCODE_F3) reset_game();
-				else if (e.key.scancode == SDL_SCANCODE_F5) set_scale(cfg.scale % 6 + 1);
+				else if (e.key.scancode == SDL_SCANCODE_F5) player_scale_to(cfg.scale % 6 + 1);
 				else if (e.key.scancode == SDL_SCANCODE_F6) set_shape((aspect_i + 1) % N_ASPECTS);
 				else if (e.key.scancode == SDL_SCANCODE_F12) {
 					// F12: the picture as drawn, into Screenshots in the data folder (numbered, never overwritten)
@@ -2011,7 +2301,7 @@ int main(int argc, char **argv)
 					do snprintf(name, sizeof name, "/vf_%04d.png", ++shot);
 					while (std::filesystem::exists(shots + name, ec) && shot < 9999);
 					write_png((shots + name).c_str(), saved_frame(), shown_w(), shown_h());
-				} else if (e.key.scancode == SDL_SCANCODE_F11)
+				} else if (e.key.scancode == SDL_SCANCODE_F11 || fullscreen_key(e.key))
 					set_fullscreen(!(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN));
 			}
 		}
@@ -2026,23 +2316,13 @@ int main(int argc, char **argv)
 			if (cfg_dirty && quit_after < 0) {
 				cfg.scale = m.render_scale() / aa_now();
 				cfg.aspect = aspect_i;
-				save_settings();
-				cfg_dirty = false;
+				if (save_settings()) cfg_dirty = false;   // (else tried again at the next close, and at quit)
 			}
 			// the arcade settings are read as the game starts: restart it if one is different
 			if (assign_before) {
 				const bool changed = *assign_before != assignments_now();
 				assign_before.reset();
-				if (changed) {
-					// (the game's code is then new: recompiled before the reset, which leaves the old behind)
-					const bool code = m.set_no_time_limit(cfg.no_time_limit);
-#ifdef VF_NATIVE
-					if (code && !interp) recompile();
-#else
-					(void)code;
-#endif
-					reset_game();
-				}
+				if (changed) reset_game();   // (the cheats' code patches with it)
 			}
 			pstate[0] = pstate[1] = pad_state{};   // the button that closed it isn't a move
 			pstate[0].back_was = pstate[1].back_was = true;
@@ -2080,7 +2360,7 @@ int main(int argc, char **argv)
 				if (q < frame_bytes * 3 / 2) low = int(std::ceil(QUEUED - double(q) / frame_bytes));
 			}
 			frame_clock += dt * rate;
-			m.set_parts_mode(gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale()));
+			m.set_parts_mode(on_gpu());
 			int due = int(int64_t(std::floor(frame_clock)) - game_run);
 			// A pass that came late (a scene change's work, the machine busy elsewhere) doesn't run
 			// the time it lost as frames back to back: that made the game, and smooth motion's
@@ -2103,61 +2383,15 @@ int main(int argc, char **argv)
 			else if (sound_full) due = 0;   // (the clock stops at the next frame, below)
 			const uint64_t t0 = SDL_GetTicksNS();
 			for (int i = 0; i < due; i++) {
-				switch (read_inputs(m, pads, pstate, cfg.ctl)) {
-				case hotkey::menu: open_menu(); break;
-				case hotkey::scale: set_scale(cfg.scale % 4 + 1); break;
-				case hotkey::aspect: set_shape((aspect_i + 1) % N_ASPECTS); break;
-				case hotkey::none: break;
-				}
-				if (menu.is_open()) break;
-				if (cfg.infinite_energy || cfg.one_hit_ko || cfg.no_time_limit) m.fight_cheats(cfg.infinite_energy, cfg.one_hit_ko, cfg.no_time_limit);
+				if (!frame_inputs()) break;
 				m.run_frame();
-				game_run++;
-				// leaving the service menu: the PC build restarts at once, past the boot screen
-				if (g_left_test_menu) { g_left_test_menu = false; if (g_pc_mode) { reset_game(); break; } }
-				// With smooth motion a frame is only drawn when shown: while a scene change is held,
-				// draw it anyway so the hold sees the real picture (else it waits on black forever),
-				// though it isn't shown
-				// (in parts when the GPU puts the pictures together: only the 3D drawn at the render scale)
-				bool probe_parts = false;
-				if (m.smooth() && sync.holding()) {
-					if (gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale())) {
-						g3_prepare();
-						probe_parts = m.render_parts(double(m.frame_number()), parts, false) == 1;
-					}
-					else m.render_smooth(double(m.frame_number()), false);
-				}
-				const bool was_holding = sync.holding();
-				const bool show_it = sync.show(m);
-				// a curtain shown while the hold goes on: frame() as just drawn, or that picture put
-				// together by the GPU
-				if (show_it) {
-					curtain = sync.holding();
-					curtain_on_gpu = probe_parts && sync.holding() &&
-									 gc.draw(parts, m.frame_w(), m.frame_h(), m.render_scale() > 1 ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
-				}
-				show_frame = show_it || show_frame;
-				// a new scene: nothing to blend from, unless both lists kept are its own (it was built
-				// after frames with no 3D, which forget the old scene's): then it moves from its first
-				// picture on, instead of standing still until a third list came
-				static uint64_t hold_from = 0;
-				if (!was_holding && sync.holding()) hold_from = m.frame_number();
-				if (was_holding && !sync.holding()) {
-					float sa; int older, newer;
-					m.smooth_state(sa, older, newer);
-					if (older < 0 || uint64_t(older) + 1 < hold_from) m.smooth_cut();
-				}
-				if (audio && !ff) {
-					if (SDL_GetAudioStreamQueued(audio) == 0) perf.starved++;   // the sound ran dry: a crackle
-					SDL_PutAudioStreamData(audio, m.m_audio_out.data(), int(m.m_audio_out.size() * 2));
-				}
-				m.m_audio_out.clear();
+				if (!after_frame(ff)) break;
 			}
 			frame_clock = std::min(frame_clock, double(game_run) + 0.999);   // (frames not run: the menu opened, a restart)
 			if (curtain_on_gpu) { show_target = in_texture = true; tp.kind = 'F'; }
 			tp.due = due;
 			// testing: VF_TEST_LOAD, a slow start (the governor's tests)
-			if (test_load_ms > 0 && due && gov_from && SDL_GetTicksNS() < gov_from - 10000000000ull + uint64_t(test_load_s * 1e9))
+			if (test_load_ms > 0 && due && started_at && SDL_GetTicksNS() < started_at + uint64_t(test_load_s * 1e9))
 				for (const uint64_t until = SDL_GetTicksNS() + uint64_t(test_load_ms * 1e6 * due * cfg.scale * cfg.scale / 9); SDL_GetTicksNS() < until;) {}
 			if (due) tp.emu = SDL_GetTicksNS() - t0;
 			if (due) {
@@ -2172,7 +2406,7 @@ int main(int argc, char **argv)
 			// The limit is a budget, not a minimum gap: a gap of 8 ms skipped about a third of a 120 Hz
 			// screen's refreshes (8.3 ms apart, give or take), so it showed 70-odd pictures, not 120.
 			// a stage's sky scaled on its threads and done, not yet in use: a band of it to the GPU
-			if (gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale())) {
+			if (on_gpu()) {
 				model1::gpu_image pending;
 				if (m.sky_pending(pending)) {
 					const uint64_t tq = SDL_GetTicksNS();
@@ -2186,21 +2420,35 @@ int main(int argc, char **argv)
 			  smooth_budget = std::min(2.0, smooth_budget + double(bt - budget_t) / double(smooth_gap_ns));
 			  budget_t = bt; }
 			const bool unseen = SDL_GetWindowFlags(win) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED);
-			if (m.smooth() && !sync.holding() && !unseen && (due || smooth_budget >= 1)) {
+			// (a picture every refresh of the screen, vsync its pace, whatever its rate: no limit; the
+			// budget, refilled by a clock that drifts against the screen's, skipped one now and then: a
+			// refresh's stutter. VF3's d2265b3)
+			double &screen_hz = screen_hz_now;
+			static bool vsync_on = true;   // (vsync forced off, or not taken: present returns at once, so not every pass)
+			{ static uint64_t hz_t = 0;
+			  if (SDL_GetTicksNS() - hz_t > 1000000000ull) {
+				  hz_t = SDL_GetTicksNS();
+				  if (const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(win))) screen_hz = dm->refresh_rate;
+				  int v = 0;
+				  vsync_on = SDL_GetRenderVSync(ren, &v) && v != 0;
+			  } }
+			const bool every_refresh = screen_hz > 0 && !hidden && vsync_on;
+			if (m.smooth() && !sync.holding() && !unseen && (due || every_refresh || smooth_budget >= 1)) {
 				smooth_budget = std::max(0.0, smooth_budget - 1);
 				const double now = double(m.frame_number() - 1) + std::clamp(frame_clock - double(game_run), 0.0, 1.0);
 				const uint64_t tr = SDL_GetTicksNS();
 				const double t = std::min(now, double(m.frame_number()));
 				tp.now = t;
 				tp.kind = 'N';
-				if (gpu_2d && aa_now() == 1 && !gpu_failed.count(m.render_scale())) {
+				if (on_gpu()) {
 					g3_prepare();
 					const int r = m.render_parts(t, parts);
 					const uint64_t tc = SDL_GetTicksNS();
 					tp.draw = tc - tr;
 					if (r == 0) tp.kind = 'C';
 					else if (r == 2) tp.kind = 'W';
-					const bool composed = r == 1 && gc.draw(parts, m.frame_w(), m.frame_h(), m.render_scale() > 1 ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+					const bool composed = r == 1 && gc.draw(parts, m.frame_w(), m.frame_h(), m.render_scale() > 1 ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST) &&
+										  (aa_now() == 1 || gc.resolve(aa_now(), shown_w(), shown_h()));
 					if (r == 1) tp.compose = SDL_GetTicksNS() - tc;
 					if (composed) {
 						show_target = in_texture = true;
@@ -2220,6 +2468,7 @@ int main(int argc, char **argv)
 												  gpu_pictures, d.n, m.frame_w(), m.frame_h(), d.big, d.most);
 								else fprintf(stderr, "pictures drawn on the CPU from now on: the GPU's picture %d couldn't be read back\n", gpu_pictures);
 								gpu_2d = false;
+								m.set_gpu_edge(false);
 								gc.reset();
 								show_target = in_texture = false;
 							}
@@ -2306,7 +2555,10 @@ int main(int argc, char **argv)
 		}
 		SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
 		SDL_RenderClear(ren);
-		SDL_RenderTexture(ren, show_target ? gc.target() : tex, nullptr, nullptr);
+		// (Random fighter played alone: the select it makes for itself (a moment) isn't shown: who you
+		// got is a surprise when the fight comes in)
+		if (!m.random_select_hidden())
+			SDL_RenderTexture(ren, show_target ? (aa_now() > 1 && gc.resolved() ? gc.resolved() : gc.target()) : tex, nullptr, nullptr);
 		draw_filter();
 		menu.render();
 		static const int shot_at = getenv("VF_SHOT_AT") ? atoi(getenv("VF_SHOT_AT")) : -1;   // testing: the window at that pass too
@@ -2329,7 +2581,36 @@ int main(int argc, char **argv)
 		// a pass whose picture stays on purpose (a held scene change, a camera cut's hold): not one
 		// the governor counts as missed
 		if (!paused && !menu.is_open() && (sync.holding() || cut_hold)) perf.held++;
+		// the next frame, if it'll be due by the next refresh, run while this present waits
+		bool ahead = false;
+		uint64_t ahead_t = 0;
+		if (!no_game_thread && running && m.smooth() && !paused && !menu.is_open() && !sync.holding() &&
+			!SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_TAB] && frame_clock - double(game_run) >= 0.5 &&
+			!(audio && SDL_GetAudioStreamQueued(audio) > frame_bytes * int(FRAME_HZ * 0.3)) &&   // (the game waiting for the sound: none ahead either)
+			frame_inputs()) {
+			ahead = true;
+			ahead_t = SDL_GetTicksNS();
+			gt.start([&] { m.run_frame(); });
+		}
 		SDL_RenderPresent(ren);
+		{   // (VF3's pace log: a pass over 1.5 refreshes, by what it ran)
+			const double refresh = screen_hz_now > 0 ? 1e9 / screen_hz_now : 8333333.0;
+			if (double(SDL_GetTicksNS() - pass_t) > 1.5 * refresh) {
+				if (tp.due) perf.long_frame++; else if (tp.kind == 'N' || tp.kind == 'W') perf.long_picture++; else perf.long_other++;
+			}
+		}
+		if (ahead) {
+			perf.ahead++;
+			gt.wait();
+			const uint64_t e = SDL_GetTicksNS() - ahead_t;
+			perf.emu += e;
+			perf.emu_max = std::max(perf.emu_max, e);
+			curtain = false;
+			curtain_on_gpu = false;
+			after_frame(false);
+			carried_curtain = curtain;
+			carried_on_gpu = curtain_on_gpu;
+		}
 		if (trace) {
 			const bool stopped = paused || menu.is_open();
 			if (stopped) tp.kind = 'X';
@@ -2380,6 +2661,7 @@ int main(int argc, char **argv)
 					save_blob(nv_path, m.nvram().data(), m.nvram().size());
 					save_blob(ee_path, m.eeprom(), model1::EEPROM_SIZE);
 					saved_hash = h;
+					save_rank_names();
 				}
 			}
 		}
@@ -2393,69 +2675,8 @@ int main(int argc, char **argv)
 				SDL_SetWindowTitle(win, t);
 				fprintf(stderr, "%s\n", t);
 			}
-			if (((!hidden && quit_after < 0) || getenv("VF_GOVERN")) && !paused && !menu.is_open()) {
-				const double secs = double(SDL_GetTicksNS() - perf.since) / 1e9;
-				const double busy = double(perf.work) / (secs * 1e9);   // CPU work, not the wait for the screen
-				// or short of pictures: fewer than 90% of what it aims for (the screen's refresh, 120 at
-				// most, or 60 once limited) while busy; a missed refresh is spent waiting, not working
-				float hz = 60;
-				if (const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(win)))
-					if (dm->refresh_rate > 0) hz = dm->refresh_rate;
-				if (hidden && getenv("VF_HZ")) hz = float(atof(getenv("VF_HZ")));
-				// what it aims for leaves out the passes that hold a picture on purpose: a scene change
-				// (up to 45 frames) or a camera cut isn't the machine falling behind
-				const double aim = std::min<double>(hz, smooth_gap_ns < 16666666 ? 120 : 60) * (1.0 - std::min(1.0, perf.held / 120.0));
-				const double fps = perf.shown / secs;
-				const bool short_of = m.smooth() && fps < aim * 0.9 && busy > 0.6;
-				// only what the player would notice: too few pictures, the sound running dry, or no
-				// time left at all (a busy CPU that still keeps up is left alone)
-				const bool dropouts = perf.starved > 0 && busy > 0.6;
-				// only steady play counts: a window with a scene change or a camera cut held in it (and
-				// the work around them) neither counts toward stepping down nor clears the count
-				const bool judged = SDL_GetTicksNS() >= gov_from;      // (not in the first 10 s on show)
-				if (perf.held == 0 && judged) over_windows = (short_of || dropouts || busy > 0.97) ? over_windows + 1 : 0;
-				// calm: every picture there, the sound fed, busy under 55%
-				const bool calm = !short_of && !dropouts && busy < 0.55 && (!m.smooth() || fps >= aim * 0.9);
-				if (perf.held == 0 && judged) gov_calm = calm ? gov_calm + 1 : 0;
-				if (trace) fprintf(trace, "# pass %lld governor window: busy %.0f%% shown %.0f/s aim %.0f starved %d over %d\n", (long long)frames_run, busy * 100, fps, aim, perf.starved, over_windows);
-				if (over_windows >= 3) {
-					over_windows = 0;
-					gov_calm = 0;
-					if (gov_raised) gov_no_raise = true;     // (a step back up that didn't hold: no more this run)
-					if (trace) fprintf(trace, "# pass %lld governor acts\n", (long long)frames_run);
-					if (player_scale < 0) { player_scale = cfg.scale; player_aa = cfg.aa; }
-					// (60 a second only on a screen faster than 60 Hz: at 60 or less a picture each
-					// refresh is no more, and the budget would leave refreshes without one)
-					if (smooth_gap_ns < 16666666 && hz > 65) {
-						smooth_gap_ns = 16666666;
-						fprintf(stderr, "load %.0f%%, %.0f FPS: smooth pictures limited to 60 a second\n", busy * 100, fps);
-						log_state("the governor's");
-					} else if (cfg.aa != 1) {
-						cfg.aa = 1; set_scale(cfg.scale, false);
-						fprintf(stderr, "load %.0f%%, %.0f FPS: antialiasing off\n", busy * 100, fps);
-					} else if (cfg.scale > 1) {
-						set_scale(cfg.scale - 1, false);
-						fprintf(stderr, "load %.0f%%, %.0f FPS: render scale lowered to %dx\n", busy * 100, fps, cfg.scale);
-					}
-				}
-				// back up a step towards the player's after 10 s of calm (10 windows)
-				else if (gov_calm >= 10 && !gov_no_raise && player_scale >= 0 && (cfg.scale < player_scale || cfg.aa != player_aa || smooth_gap_ns > 8333333)) {
-					gov_calm = 0;
-					gov_raised = true;
-					if (cfg.scale == player_scale && cfg.aa == player_aa) {   // (the last step: a picture each refresh again)
-						smooth_gap_ns = 8333333;
-						fprintf(stderr, "load %.0f%%, %.0f FPS: smooth pictures each refresh again\n", busy * 100, fps);
-						log_state("the governor's");
-					} else if (cfg.scale < player_scale) {
-						fprintf(stderr, "load %.0f%%, %.0f FPS: render scale back up to %dx\n", busy * 100, fps, cfg.scale + 1);
-						set_scale(cfg.scale + 1, false);
-					} else {
-						fprintf(stderr, "load %.0f%%, %.0f FPS: antialiasing back on\n", busy * 100, fps);
-						cfg.aa = player_aa;
-						set_scale(cfg.scale, false);
-					}
-				}
-			}
+			if (trace) fprintf(trace, "# pass %lld long passes: %d with a frame, %d a picture only, %d neither; frames run during the present %d\n",
+							   (long long)frames_run, perf.long_frame, perf.long_picture, perf.long_other, perf.ahead);
 			perf = perf_stats{ perf.show };
 			perf.since = SDL_GetTicksNS();
 		}
@@ -2470,11 +2691,12 @@ int main(int argc, char **argv)
 	m.set_gpu3d(nullptr);
 	g3.reset();                          // (its device goes before SDL does)
 	if (gpu_check) fprintf(stderr, "gpu check: %d pictures put together on the GPU checked, %d differ\n", gpu_checked, gpu_differ);
-	gc.reset();                          // (its textures go before the renderer)
+	gc.release();                        // (its textures and shader go before the renderer)
 	if (quit_after >= 0 && !getenv("VF_SAVE")) { SDL_Quit(); return 0; }   // test runs leave the saves and settings alone (VF_SAVE: they save, as a player's)
 	keep_arcade_coins();
 	save_blob(nv_path, m.nvram().data(), m.nvram().size());
 	save_blob(ee_path, m.eeprom(), model1::EEPROM_SIZE);
+	save_rank_names();
 	if (cfg_dirty) {
 		cfg.scale = m.render_scale() / aa_now();
 		cfg.aspect = aspect_i;

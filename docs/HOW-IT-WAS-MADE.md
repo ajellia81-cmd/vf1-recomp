@@ -86,6 +86,12 @@ Nothing was taken as working until it was measured. These checks run on every ch
 - **GPU against CPU.** From 2x the picture is put together on the GPU. A check draws the same pictures both ways and
   requires them to match pixel for pixel at every scale and shape. At start-up the game runs a small version of the
   same check on the player's own renderer (Metal, Direct3D, OpenGL or Vulkan).
+- **The cheats against the last release.** Before the random fighter shipped, one small driver was built against both
+  the last release and the new code and played the same 16,000 frames: attract, a 1P arcade game on random inputs,
+  and a challenger. It hashed every frame's picture, RAM, sound and program ROM. With the cheats at their defaults,
+  all four matched on every frame. A second test turned each random mode on, played a select and a fight, then
+  turned it off the way the menu's restart does. It required the ROM to match the original byte for byte. Four
+  independent code reviews ran alongside, and their findings were fixed or written up before the release.
 - **Where MAME is wrong.** MAME is the reference, but not the arcade. When they disagree, cabinet footage and photos
   decide. In name entry, for example, MAME draws half the wheel's letters black, while cabinet captures show them blue
   and red, so the port departs from MAME there on purpose. The commit says why, and the MAME check is expected to differ
@@ -114,8 +120,76 @@ this:
 
 The AI wrote nearly all the code. A person decided what was right.
 
+## A case study: the random fighter's heads
+
+Random fighter (menu > Cheats) builds a fighter from parts of the cast: one character's head on another's body,
+moves from three move lists. It took several rounds to make those fighters move like the real cast, and the rounds
+show how the work went, including the wrong turns.
+
+- **The complaint:** heads looked up, or twitched left and right, at the ends of moves. Screenshots alone couldn't say
+  why, so the first step was always a measurement: a test-only log (`VF_JOINTLOG`) prints each fighter's head and
+  limbs, as the game's own display lists have them, for real characters and random ones.
+- **A fix that made it worse.** Smooth motion eases a random fighter's pose between moves. A first attempt eased every
+  part down the skeleton, head included. The hands stayed on the wrists, but heads turned further and a face lost a
+  piece. It was reverted the same day. The version that stayed eases only the limbs down the skeleton, and the
+  head-to-torso angle was checked to be unchanged on every frame of three fights.
+- **The wrong baseline.** Flick counts first came from one real fight (Akira against Jacky), which made random
+  fighters look twice as bad as they were. A real baseline needs the same script played by each real character:
+  `VF_COPYREC` copies any character's record into both players' places, so six real characters fought the same fight.
+- **A correction that caused nodding.** The head-lean correction followed whose move was playing, so it changed at
+  every change of move and the head nodded with it. It is now one lean per fighter. The lean is applied to the head's
+  vertices, not its matrix, so the matrix logs never showed it: the log was extended to print what is drawn.
+- **Finding the real cause in the game's code.** Comparing real Jacky's punch with a random fighter playing the same
+  punch, frame by frame, showed identical heads in the middle of the move and a split only in the last 16 frames.
+  The RAM was then dumped on every frame (`dump` in the test scripts) and diffed, real against random, until the
+  values that split only there were found. A write watch (`VF_WATCHW`, which logs the program counter of every write)
+  led to the code, and the disassembler (`vfdis`) showed it. The game blends the end of every move toward a stance it
+  looks up by the fighter's move list in a list of the ten characters. A random fighter's move list isn't in it, so
+  the lookup fell through to the first entry, Dural, whose stance has the other foot forward. Every move ended by
+  twisting toward Dural's stance, then snapped into the fighter's own. A second fault was found the same way: the
+  stance table is built at boot from player 1's record, which with random opponents was itself random.
+- **The fix**, in the game's own terms: the lookup now reads a per-record key into a small table of the port's own
+  (the same technique as the special moves), and the boot builds the stance table from the original records. Checked:
+  the stance table is byte for byte the real game's, a punch's end into the stance moves the head 4-7 degrees in a
+  frame (the real cast's range, down from up to 49), head flicks over whole fights are within the real cast's rate,
+  and the real game is unchanged frame for frame. With the game's own blend working, the port's extra easing for
+  random fighters was no longer needed (it made jump attacks ramp up out of the old pose), so it was switched off:
+  random fighters now move with exactly the smoothing the real cast gets.
+- **A fix's own side effect.** The owner then saw the stance snap once as the intro began. The first check said it
+  didn't reproduce, but that check skipped the first 300 frames, which is the whole intro. Measured from the first
+  frame, every random fighter's pose jumped 27-54 degrees at frame 241, and no real character's did. The boot fix
+  held the original move lists for a fixed 240 frames, but a write watch showed the table is built on frames
+  203-204 and the fighters are drawn from 211, so the lists came back while the fighters were on screen. They now
+  come back at frame 206. Checked: no jump in the intro for three random casts, and the stance table is still byte
+  for byte the real game's. The lesson: when a measurement says "can't reproduce", check what it left out.
+- **Shared models.** The port styles a random fighter's head (its colours, its turn, the neck fit) by the models it
+  draws, and two fighters can wear the very same models: a random fighter with Jeffry's head against the computer's
+  Jeffry. Only the random fighter's style was listed, so the computer's Jeffry was drawn in it too: the random hue
+  in his hair and a hole in his jaw where the neck fit moved part of his face. Now every fighter's head is listed
+  (the computer's plainly, as the game has it), and a model both wear is told apart by which torso it is nearer.
+- **Names as seeds.** A random fighter's name only says which three characters it's blended from, so a name can't be
+  decoded into a fighter. Instead the port makes the fighter of each of 32,768 seeds once (on a copy of the game's
+  data, put back after), keeps the first seed for each name (339 names, all found by seed 11,775), and a name typed
+  in the menu means that seed. So the same name is the same fighter everywhere, and a name no fighter has is
+  refused.
+- **Two players, three choices each.** Each player can be Normal, Random or a character seed. Random fighters live in
+  Akira's two records (his two costumes), so the question was which record each player ends up in. A write watch
+  showed the pick stores a character number in the player's block and the match load turns it into the record. A
+  first test said two players picking Akira share one record, but the test's own shortcut (writing the cursor
+  straight into memory) caused that: with real joystick presses, player 1's side always gets one record and player
+  2's the other. So each player's setting makes their side's record, and nothing can collide. The select shows only
+  when a Normal player is at it, each side's portrait the head that side will get, and a random player's controls
+  are locked there. Checked with eight set-ups, from one player on either side to a challenger joining mid-game.
+  The lesson: a test shortcut can create the very bug it's looking for; check the finding with real inputs.
+- **Random mode must not touch the real game.** A check found that switching Random fighter off left the last random
+  fighter's head colour and neck fit on the real character who owns that head. Everything random mode sets is now
+  cleared when it goes off, and the game with it off was compared frame by frame against the build before.
+
 ## Problems worth knowing about
 
+- **The random fighter's round-1 build didn't happen at all** → its end check subtracted a start frame still in the
+  future from an unsigned frame counter, which wrapped to a huge number and cleared the build on its first frame →
+  the subtraction is signed. Found from a contact sheet of the intro, not from the code.
 - **Fighters' hair on the floor** → MAME's old high-level simulation of the TGP gets some geometry wrong → the TGP now
   runs its real program, and the port requires the ROM that contains it.
 - **Dotted lines along the ring's edge at 4x** → MAME's filler rounds vertices to whole pixels, leaving gaps between
@@ -148,6 +222,25 @@ The AI wrote nearly all the code. A person decided what was right.
   touch it.
 - **A crash at exit on Linux** → a widescreen write ran past the end of each line in the tile chip → found with ASan
   and fixed. ASan now runs clean at several scales and shapes.
+- **Random fighters' moves ended twisting round, the head looking up, then snapped into their stance** → the game
+  looks a fighter's stance up by its move list in a list of ten; a random fighter's list isn't there, so it got
+  Dural's, and the stance table was built at boot from a random record → the lookup reads a per-record key into the
+  port's own table, and the boot builds the table from the original records.
+- **Random fighters' heads nodded at every change of move** → the head-lean correction followed whose move was
+  playing → one lean per fighter.
+- **A random fighter's hand floated off its wrist while smooth motion eased between moves** → each part was eased on
+  its own about the hips → arms and legs ease down the skeleton, each part on the one it hangs from.
+- **Switching Random fighter off left a random head's colour on a real character** → the head styles were only
+  refreshed while random mode ran → cleared as it goes off.
+- **A seeded random fighter wasn't the same as the computer's** (another voice, some moves of the character whose
+  place it took) → it was made on whatever record it went in, and the fields the mixer doesn't touch (the character
+  number the game's move code and voices key on, size, weight) stayed that record's → every one is made on Akira's
+  record and moved in, and the voice is looked up by the record's key in the port's own table (a five-byte read
+  replaced by a call into the ROM's empty space), so it can be one of the three it's made of.
+- **Before launch, a sweep of every character cheat** → three read-only reviews in parallel (the game's state, the
+  rendering, the menus of both games), each finding checked in the code before anything changed. Real ones fixed (a
+  skin match that turned themed clothes into skin, a secret character whose hands a Random opponents remake took,
+  seed letters read by key position on non-US keyboards); the rest written down with why they were left.
 
 ## Where to look
 
@@ -160,4 +253,8 @@ The AI wrote nearly all the code. A person decided what was right.
 - `src/gpu/`, `src/machine/model1_gpu.cpp`: the GPU renderer (Metal, SDL_GPU and their shaders).
 - `tools/vfrun.cpp`, `tools/vfscript.cpp`: the headless runner and the scripted test harness. `tools/vfcov.cpp` makes
   the coverage runs the map comes from.
+- `src/machine/model1.cpp` (`random_fighter_*`), `model1_interp.cpp` (`pose_*`), `model1_video.cpp` (`neck_*`): Random
+  fighter, its pose easing and its heads. Test-only switches print what the game does (`VF_JOINTLOG`, `VF_HEADLOG`,
+  `VF_POSELOG`, `VF_CASTLOG`), compare with VF's own behaviour (`VF_STANCE_VF`, `VF_LEAN_BY_MOVE`, `VF_NOPOSE`) or
+  watch the game's writes (`VF_WATCHW`); `tools/vfdis.cpp` disassembles the V60 code they lead to.
 - `git log`: each commit message explains what changed, why, and how it was checked.

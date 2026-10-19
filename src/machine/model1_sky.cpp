@@ -512,7 +512,8 @@ struct screen_record { const char *name; uint32_t hash; };
 // Cheats' Siba (Majido) in Akira's place changes the map (his own select icon): its first frame
 // and player 1 alone, as a7c660d4 and fa5cc994 are Akira's.
 // 46ffddc5: the select's very first frame, before its first layout (its sides came a frame late).
-const screen_record SCREEN_RECORDS[] = { { "title", 0x6e31a62b }, { "select", 0xfa5cc994 },
+// 5511db88: the title's first frame, half built (drawn wide as the scene before, junk at its sides).
+const screen_record SCREEN_RECORDS[] = { { "title", 0x6e31a62b }, { "title", 0x5511db88 }, { "select", 0xfa5cc994 },
 										 { "select", 0x282467f8 }, { "select", 0xa7c660d4 }, { "select", 0x46ffddc5 },
 										 { "select", 0x14d0cd96 }, { "select", 0x0bc13456 } };
 } // namespace
@@ -552,6 +553,7 @@ void model1::draw_screen_sides(bitmap_rgb32 &bitmap)
 	float gain[2][3];
 	for (int side = 0; side < 2; side++) {
 		double game[3] = {}, pic[3] = {};
+		int n = 0;
 		for (int y = 0; y < SCREEN_H; y += 2)
 			for (int i = 0; i < 8; i++) {
 				const int ax = side ? SCREEN_W - 1 - i : i;
@@ -563,6 +565,7 @@ void model1::draw_screen_sides(bitmap_rgb32 &bitmap)
 					game[c] += (g >> (16 - 8 * c)) & 0xff;
 					pic[c] += (p >> (16 - 8 * c)) & 0xff;
 				}
+				n++;
 			}
 		for (int c = 0; c < 3; c++) {
 			float r = pic[c] > 0 ? float(game[c] / pic[c]) : 1.0f;
@@ -572,8 +575,12 @@ void model1::draw_screen_sides(bitmap_rgb32 &bitmap)
 		// A fade takes the colours down (or up) together. Far apart, the backdrop isn't the picture's
 		// yet: the select's first frame from the title has it all one blue, its palette not set, under
 		// the game's black. Black sides, as the picture.
-		const float *g = gain[side];
-		if (std::max({ g[0], g[1], g[2] }) - std::min({ g[0], g[1], g[2] }) > 0.5f)
+		// (only the channels the picture has some of: one it hasn't (its gain held at 1) isn't a
+		// disagreement, and took the sides black halfway through an ordinary fade)
+		float lo = 2, hi = 0;
+		for (int c = 0; c < 3; c++)
+			if (n && pic[c] / n >= 16) { lo = std::min(lo, gain[side][c]); hi = std::max(hi, gain[side][c]); }
+		if (hi - lo > 0.5f)
 			gain[side][0] = gain[side][1] = gain[side][2] = 0.0f;
 	}
 	const int s = m_scale, left = m_ext * s, right = (m_ext + SCREEN_W) * s, out_w = bitmap.width();

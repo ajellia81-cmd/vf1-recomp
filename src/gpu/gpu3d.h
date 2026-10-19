@@ -49,6 +49,7 @@ class gpu3d
 public:
 	virtual ~gpu3d() = default;
 	virtual const char *name() const = 0;
+	virtual bool software() const { return false; }   // (a GPU drawn on the CPU: llvmpipe, lavapipe, SwiftShader)
 	// The polygons drawn into `px` (w x h, rows w apart, page-aligned, `bytes` long), rows y0..y1
 	// the only ones they touch. spans: the spans worked out on the CPU (1x's, the lines' pixels),
 	// `nspans` of them; `rowspans` more after them for the rows the GPU works out. False: not drawn,

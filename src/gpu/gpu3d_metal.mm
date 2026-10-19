@@ -98,14 +98,17 @@ kernel void k_shadow(uint t [[thread_position_in_grid]], constant uint &total [[
 	const device uint *owner [[buffer(6)]], constant uint &W [[buffer(7)]], device atomic_uint *shade [[buffer(8)]],
 	const device uint *depth [[buffer(10)]])
 {
-	if (t >= total) return;
-	const span s = spans[t];
+	// (L threads a span, as k_solid: a close-up's shadow is thousands of pixels a row at 6x, one
+	// thread each walking a whole row took 15-20 ms a picture, vf1-recomp #16's intro)
+	if (t / L >= total) return;
+	const int lane = int(t % L);
+	const span s = spans[t / L];
 	if (s.xa > s.xb) return;
 	const device poly &q = polys[s.poly];
 	if (!(q.flags & SHADOW)) return;
 	const bool fighter = (q.flags & FIGHTER) != 0;
 	const uint at = uint(s.y) * W;
-	for (int x = s.xa; x <= s.xb; x++) {
+	for (int x = s.xa + lane; x <= s.xb; x += int(L)) {
 		const uint o = owner[at + uint(x)];
 		if (o > s.poly) continue;                 // a solid polygon (or line) drawn after it
 		const uint d = fighter ? depth[at + uint(x)] : 0u;
@@ -249,7 +252,7 @@ public:
 			[ce memoryBarrierWithScope:MTLBarrierScopeBuffers];
 			if (any_shadow) {
 				[ce setComputePipelineState:m_k_shadow];
-				dispatch1(ce, m_k_shadow, ns);
+				dispatch1(ce, m_k_shadow, ns * 8);   // (8 threads a span, L)
 				[ce memoryBarrierWithScope:MTLBarrierScopeBuffers];
 			}
 			if (rep + 1 == std::max(1, test_repeat)) {   // (a slow GPU's repeats leave the picture alone)
