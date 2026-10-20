@@ -1330,6 +1330,8 @@ int main(int argc, char **argv)
 	// the pictures put together on the GPU (with antialiasing too: gpu_compose::resolve averages them
 	// there, at_gpu_aa), or drawn whole by the CPU
 	auto on_gpu = [&] { return gpu_2d && !gpu_failed.count(m.render_scale()); };
+	int gpu_recheck = 0;                // a check that failed: the next pictures checked too (up to 2)
+	bool gpu_dumped = false;            // a failed check's pictures written beside the log
 	int gpu_verified = 0;               // the game's own pictures checked so far (the 1st, 60th and 600th)
 	model1::gpu_parts parts;
 	// The 3D's textures on the renderer's device (gpu3d::draw_target's), wrapped as the renderer's
@@ -1372,6 +1374,7 @@ int main(int argc, char **argv)
 	bool show_target = false;           // the picture on show is the GPU's (else tex)
 	const int gpu_check = getenv("VF_GPU_CHECK") ? atoi(getenv("VF_GPU_CHECK")) : 0;   // testing: every nth checked
 	int gpu_pictures = 0, gpu_checked = 0, gpu_differ = 0;
+	int gpu_check_from = 0;             // (the GPU's pictures counted from here for the checks: a new scale or antialiasing checks again)
 	// the picture on screen, for a file: put together by the GPU, it's drawn whole again first
 	auto saved_frame = [&] { if (m.frame_unshown()) m.redraw(); return shown_frame(); };
 	bool curtain = false;                // this pass: the frame to show is a curtain shown during a held scene change
@@ -1612,6 +1615,13 @@ int main(int argc, char **argv)
 	};
 	auto save_settings = [&] { return cfg.save(settings_path); };
 	auto set_scale = [&](int v) {
+		// (a new picture size or antialiasing: the GPU's pictures checked against the CPU's again, as at the
+		// start. Low's edge pass on the GPU, chosen after the start's checks, was never checked: on some
+		// NVIDIA cards, Direct3D 12, it left the 3D frozen or gone (vf1-recomp #29); now that's caught and
+		// the CPU draws instead)
+		gpu_check_from = gpu_pictures;
+		gpu_verified = 0;
+		gpu_recheck = 0;
 		cfg.scale = v; cfg_dirty = true;
 		m.set_render_scale(v * aa_fit(v, cfg.aa));
 		m.set_edge_aa(cfg.aa == 0);
@@ -2492,16 +2502,33 @@ int main(int argc, char **argv)
 					if (composed) {
 						show_target = in_texture = true;
 						++gpu_pictures;
-						if (gpu_verified < 3 && gpu_pictures == (gpu_verified == 0 ? 1 : gpu_verified == 1 ? 60 : 600)) {
-							gpu_verified++;
+						if (gpu_verified < 3 && (gpu_pictures - gpu_check_from == (gpu_verified == 0 ? 1 : gpu_verified == 1 ? 60 : 600) || gpu_recheck)) {
+							if (!gpu_recheck) gpu_verified++;
 							std::vector<uint32_t> back;
 							const size_t px = size_t(m.frame_w()) * m.frame_h();
 							const bool read = gc.read(back) && back.size() == px;
 							m.redraw();
-							const picture_diff d = read ? compare(back, m.frame().data(), px, parts.d3_target >= 0) : picture_diff{};
+							picture_diff d = read ? compare(back, m.frame().data(), px, parts.d3_target >= 0) : picture_diff{};
 							if (read && d.n && !d.wrong)
 								fprintf(stderr, "the GPU's picture %d: %lld of %d x %d pixels differ by rounding (%lld by more than 8, colours by %d at most): kept on the GPU\n",
 										gpu_pictures, d.n, m.frame_w(), m.frame_h(), d.big, d.most);
+							if (read && d.wrong) {
+								// both pictures beside the log, for a report (the first time only)
+								if (!gpu_dumped) {
+									gpu_dumped = true;
+									write_png((dir + "/gpu_check_gpu.png").c_str(), back.data(), m.frame_w(), m.frame_h());
+									write_png((dir + "/gpu_check_cpu.png").c_str(), m.frame().data(), m.frame_w(), m.frame_h());
+								}
+								// one picture off (a moment caught mid-change) isn't the GPU being wrong: the
+								// next two are checked too, and only the three together send it to the CPU
+								if (gpu_recheck < 2) {
+									fprintf(stderr, "the GPU's picture %d differs from the CPU's (%lld of %d x %d pixels, %lld by more than 8, colours by %d at most): checking the next\n",
+											gpu_pictures, d.n, m.frame_w(), m.frame_h(), d.big, d.most);
+									gpu_recheck++;
+									d.wrong = false;
+								}
+							} else if (read)
+								gpu_recheck = 0;
 							if (!read || d.wrong) {   // the CPU's picture, from now on
 								if (read) fprintf(stderr, "pictures drawn on the CPU from now on: the GPU's picture %d differs from the CPU's (%lld of %d x %d pixels, %lld by more than 8, colours by %d at most)\n",
 												  gpu_pictures, d.n, m.frame_w(), m.frame_h(), d.big, d.most);

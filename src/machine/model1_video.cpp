@@ -1307,6 +1307,7 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 	float outfit = -1;
 	int outfit_theme = 0;
 	outfit_tones *tones = nullptr;   // (black and white's, black and gold's split)
+	int chrome_lm = -1;              // (>= 0: Dural's chrome, her light mode)
 	uint32_t skin_rec = 0;           // (the random fighter whose model this is: its one skin, below)
 	const skin_sum *skin_ref = nullptr;
 	bool skin_prev = false;          // (the skin of a record just gone (build_prev): not measured further)
@@ -1327,7 +1328,9 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 		const uint32_t rec = pl >= 0 ? m_build[pl].rec : 0;
 		static const bool skin_off = getenv("VF_SKIN_MATCH") && !strcmp(getenv("VF_SKIN_MATCH"), "off");   // TESTONLY
 		if (rec && m_random_names.count(rec) && !skin_off) { skin_rec = rec; const auto it = m_skin_ref.find(rec); if (it != m_skin_ref.end()) skin_ref = &it->second; }
-		if (rec && m_random_names.count(rec) && !(outfit_test && !strcmp(outfit_test, "off")))
+		// (Random opponents' last fight, a random fighter in Dural's record: all of it in her chrome, with her shine)
+		if (rec == 0xfd369b && m_random_cpu && m_random_names.count(rec)) chrome_lm = dural_lightmode();
+		if (chrome_lm < 0 && rec && m_random_names.count(rec) && !(outfit_test && !strcmp(outfit_test, "off")))
 			if (const auto it = m_random_outfit.find(rec); it != m_random_outfit.end()) {
 				outfit = outfit_test && *outfit_test ? float(atof(outfit_test)) : it->second;
 				const auto th = m_random_theme.find(rec);
@@ -1469,6 +1472,7 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 		// never set the bit. In the Model 2 GEO attribute word this same bit
 		// is the top bit of the texture parameter index.
 		int lightmode = ((flags >> 17) & 15) | ((flags & 0x00400000) ? 0x80 : 0);
+		if (chrome_lm >= 0) lightmode = chrome_lm;
 
 		point_t *p0 = m_pointpt++;
 		point_t *p1 = m_pointpt++;
@@ -1736,6 +1740,12 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 				}
 			}
 
+			if (chrome_lm >= 0) {   // (Dural's chrome: grey, a little blue, its shading kept and lifted)
+				const float v = std::max({ r, g, b }) / 31.f, vv = 0.8f + 0.2f * v;
+				r = std::clamp(int(std::lround(vv * 0.93f * 31)), 0, 31);
+				g = std::clamp(int(std::lround(vv * 0.96f * 31)), 0, 31);
+				b = std::clamp(int(std::lround(vv * 31)), 0, 31);
+			}
 			if (build == 2) r = g = b = 31;   // (the build: a flash as a part goes on)
 			else if (build == 3) { const int v = (r * 30 + g * 59 + b * 11) / 100; r = g = b = std::clamp(v / 2 + 9, 0, 31); }   // (grey till all are on)
 

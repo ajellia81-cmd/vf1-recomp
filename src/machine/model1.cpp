@@ -46,6 +46,7 @@ void model1::reset()
 	m_boot_at = m_frame;
 	m_akira_held[0] = m_akira_held[1] = 0;   // (work RAM survives a reset: no one has picked)
 	m_clock_held = false;                    // (No time limit: a round held at the reset is over)
+	m_run_on = false; m_run_idle = 0; m_fought.clear(); m_built_run.clear(); m_cpu_akira.clear();   // (a new game: no run's fighters carried into it)
 	random_fighter_hold_moves();
 	for (auto &c : m_layer_cache) c.frame = ~0ull;   // a new game: nothing drawn is current
 	m_shown = m_unshown = false;                      // nor shown
@@ -1289,6 +1290,35 @@ void model1::random_fighter_roll()
 							 m_random_hue.count(r) > 0, m_random_outfit.count(r) > 0, m_stance_from.count(r) > 0, m_special_list.count(r) > 0,
 							 m_voice_of.count(r) ? int(m_voice_of[r]) : -1, m_move_ids.count(r) ? m_move_ids[r] : std::array<uint8_t, MOVE_SITE_COUNT>{}, m_move_ids.count(r) > 0 });
 		}
+	// (Random opponents, a run's continue: the computer's fighters fought so far kept as fought, for
+	// the ending's replays)
+	auto keep_rec = [&](uint32_t r, std::pair<int, uint32_t> made) {
+		keep.push_back({ r, std::vector<uint8_t>(&rom[r], &rom[r] + RECORD_SIZE), made, m_random_names.count(r) ? m_random_names[r] : std::string(),
+						 m_random_hue.count(r) ? m_random_hue[r] : 0.0f, m_random_outfit.count(r) ? m_random_outfit[r] : 0.0f, m_random_theme.count(r) ? m_random_theme[r] : 0,
+						 m_stance_from.count(r) ? m_stance_from[r] : 0, m_special_list.count(r) ? m_special_list[r] : 0,
+						 m_random_hue.count(r) > 0, m_random_outfit.count(r) > 0, m_stance_from.count(r) > 0, m_special_list.count(r) > 0,
+						 m_voice_of.count(r) ? int(m_voice_of[r]) : -1, m_move_ids.count(r) ? m_move_ids[r] : std::array<uint8_t, MOVE_SITE_COUNT>{}, m_move_ids.count(r) > 0 });
+	};
+	if (m_random_applied && m_random_fighter && m_random_cpu && m_run_on)
+		for (uint32_t r : m_fought)
+			if (r != AKIRA[0] && r != AKIRA[1] && c.orig.count(r) && m_random_names.count(r) && std::none_of(keep.begin(), keep.end(), [&](const kept &x) { return x.rec == r; })) {
+				const auto made = m_akira_made.find(r);
+				keep_rec(r, made != m_akira_made.end() ? made->second : std::pair<int, uint32_t>(0, 0));
+			}
+	// (and the computer's Akira as fought: put back once the picks are known, random_fighter_cpu)
+	if (m_random_applied && m_random_fighter && m_random_cpu && m_run_on)
+		for (uint32_t r : AKIRA)
+			if (m_fought.count(r) && m_random_names.count(r) && !m_cpu_akira.count(r)) {
+				cpu_kept &k = m_cpu_akira[r];
+				k.bytes.assign(&rom[r], &rom[r] + RECORD_SIZE);
+				k.name = m_random_names[r];
+				if ((k.has_hue = m_random_hue.count(r) > 0)) k.hue = m_random_hue[r];
+				if ((k.has_outfit = m_random_outfit.count(r) > 0)) { k.outfit = m_random_outfit[r]; k.theme = m_random_theme.count(r) ? m_random_theme[r] : 0; }
+				if ((k.has_stance = m_stance_from.count(r) > 0)) k.stance = m_stance_from[r];
+				if ((k.has_list = m_special_list.count(r) > 0)) k.list = m_special_list[r];
+				if (m_voice_of.count(r)) k.voice = m_voice_of[r];
+				if ((k.has_move_ids = m_move_ids.count(r) > 0)) k.move_ids = m_move_ids[r];
+			}
 	// (the cast as they were, if random ones were made: Off leaves alone what the Secret character
 	// cheat set, as Akira's place's portrait head)
 	if (m_random_applied) for (const auto &[r, b] : c.orig) memcpy(&rom[r], b.data(), RECORD_SIZE);
@@ -1303,6 +1333,18 @@ void model1::random_fighter_roll()
 	m_akira_made.clear();
 	if (!m_random_fighter) { random_fighter_strands(); random_fighter_specials(); if (m_akira_which > 0) akira_slot_heads(m_secret_recs[0]); return; }
 	m_random_applied = true;
+	for (const kept &k : keep) {   // (the computer's kept: as they were)
+		if (k.rec == AKIRA[0] || k.rec == AKIRA[1]) continue;
+		const uint32_t r = k.rec;
+		memcpy(&rom[r], k.bytes.data(), RECORD_SIZE);
+		if (!k.name.empty()) m_random_names[r] = k.name;
+		if (k.has_hue) m_random_hue[r] = k.hue;
+		if (k.has_outfit) { m_random_outfit[r] = k.outfit; m_random_theme[r] = k.theme; }
+		if (k.has_stance) m_stance_from[r] = k.stance;
+		if (k.voice >= 0) m_voice_of[r] = uint8_t(k.voice);
+		if (k.has_move_ids) m_move_ids[r] = k.move_ids;
+		if (k.has_list) m_special_list[r] = k.list;
+	}
 	for (uint32_t r : AKIRA) {
 		const auto k = std::find_if(keep.begin(), keep.end(), [&](const kept &x) { return x.rec == r; });
 		if (k != keep.end()) {
@@ -1375,6 +1417,7 @@ void model1::random_fighter_build(bool select)
 			p.has_skin = sk != m_skin_ref.end() && sk->second.n;
 			if (p.has_skin) p.skin = sk->second;
 		}
+		if (getenv("VF_RANDLOG") && (rec >> 16) == 0xfd) fprintf(stderr, "BLOCK pl%d %06x %s frame %llu\n", pl, rec, m_random_names.count(rec) ? m_random_names[rec].c_str() : "-", (unsigned long long)m_frame);   // TESTONLY
 		b.rec = rec;
 		b.start = -1;
 		b.group.clear();
@@ -1406,6 +1449,9 @@ void model1::random_fighter_build(bool select)
 		strand_polys(pl, strands);
 		for (uint32_t p : strands) put(p, 8);
 		if (!build || select) continue;
+		// (the computer's side: built once a run, not again in a continue's rematch or the ending's replays)
+		const bool cpu_side = m_ram_a.size() > 0x7600 && !(m_ram_a[0x7483 + 0x80 * pl] & 0x08);
+		if (cpu_side && m_run_on) { if (m_built_run.count(rec)) continue; m_built_run.insert(rec); }
 		b.start = int64_t(m_frame) + delay + BUILD_DELAY;
 		if (getenv("VF_RANDLOG")) fprintf(stderr, "BUILD pl%d %06x frame %llu: %zu models\n", pl, rec, (unsigned long long)m_frame, b.group.size());   // TESTONLY
 	}
@@ -2650,6 +2696,34 @@ bool model1::select_showing() const
 	return false;
 }
 
+// Dural's shine (her polygons' light mode: the game's light parameters with a specular term), for a
+// random fighter made in her record (Random opponents' last fight): the most of her own models' polygons'
+int model1::dural_lightmode()
+{
+	if (m_dural_lm != -2) return m_dural_lm;
+	m_dural_lm = -1;
+	random_cast &c = random_fighter_cast();
+	const auto it = c.orig.find(0xfd369b);
+	if (it == c.orig.end()) return m_dural_lm;
+	auto &rom = m_regions.maincpu;
+	const std::vector<uint8_t> &b = it->second;
+	auto rd = [&](const uint8_t *q) { return uint32_t(q[0] | q[1] << 8 | q[2] << 16 | uint32_t(q[3]) << 24); };
+	std::map<int, int> n;
+	for (uint32_t off : { 0x0eu, 0x12u, 0x16u, 0x1au, 0x1eu, 0x26u, 0x2au, 0x32u, 0x36u, 0x3au, 0x3eu, 0x42u, 0x46u, 0x4au }) {
+		if (off + 4 > b.size()) continue;
+		const uint32_t m = rd(&b[off]);
+		if ((m >> 16) != 0x2d || m + 12 > rom.size()) continue;
+		const uint32_t p = rd(&rom[m + 8]) & 0x7fffff;
+		for (uint32_t a = p + 6, k = 0; k < 4096 && (a + 1) * 4 <= m_regions.polygons.size() && (m_poly_rom[a] & 3); a += 10, k++) {
+			const uint32_t f = m_poly_rom[a];
+			n[int(((f >> 17) & 15) | ((f & 0x00400000) ? 0x80 : 0))]++;
+		}
+	}
+	int most = 0;
+	for (const auto &[lm, k] : n) if (k > most) { most = k; m_dural_lm = lm; }
+	return m_dural_lm;
+}
+
 // Random opponents: every record but Akira's, a Secret character's and those the players picked
 // (their character, -4B in their blocks, through player 1's side's table, fd2f1b: player 2's
 // side's +9 in it) made random
@@ -2659,6 +2733,8 @@ bool model1::select_showing() const
 bool model1::cpu_keeps(uint32_t r) const
 {
 	if (r == m_secret_recs[0] || r == m_secret_recs[1] || r == m_cpu_human[0] || r == m_cpu_human[1]) return true;
+	// (fought this run: kept as fought, for the ending's replays; not Akira's two, a player's at a select)
+	if (m_run_on && m_fought.count(r) && r != 0xfd4f99 && r != 0xfd3f6f) return true;
 	for (int pl = 0; pl < 2; pl++)
 		if (m_random_fighter && m_player_mode[pl] == 3 && m_player_seed[pl] >= 1 && m_player_seed[pl] <= 7)
 			if (r == SECRET[m_player_seed[pl]][0] || r == SECRET[m_player_seed[pl]][1]) return true;
@@ -2688,8 +2764,20 @@ void model1::random_fighter_cpu()
 	// outside a match, the attract's demo keeping the players' settings, random_fighter_roll)
 	const bool anyone = m_ram_a.size() > 0x7600 && ((m_ram_a[0x7483] | m_ram_a[0x7503]) & 0x08);
 	for (uint32_t r : AKIRA)
-		if (anyone && !cpu_keeps(r) && r != akira_record_of(0) && r != akira_record_of(1))
-			random_fighter_make_named(r);
+		if (anyone && !cpu_keeps(r) && r != akira_record_of(0) && r != akira_record_of(1)) {
+			const auto k = m_cpu_akira.find(r);
+			if (!m_run_on || k == m_cpu_akira.end()) { random_fighter_make_named(r); continue; }
+			// (a continue: the computer's Akira as fought this run, for the ending's replays)
+			const cpu_kept &kk = k->second;
+			memcpy(&rom[r], kk.bytes.data(), RECORD_SIZE);
+			m_random_names[r] = kk.name;
+			if (kk.has_hue) m_random_hue[r] = kk.hue;
+			if (kk.has_outfit) { m_random_outfit[r] = kk.outfit; m_random_theme[r] = kk.theme; }
+			if (kk.has_stance) m_stance_from[r] = kk.stance;
+			if (kk.has_list) m_special_list[r] = kk.list;
+			if (kk.voice >= 0) m_voice_of[r] = uint8_t(kk.voice);
+			if (kk.has_move_ids) m_move_ids[r] = kk.move_ids;
+		}
 	random_fighter_strands();
 	random_fighter_specials();
 }
@@ -2758,11 +2846,25 @@ void model1::random_fighter_frame()
 			const uint32_t o = 0x6b0 + 0x1800 * pl;
 			now[pl] = uint32_t(m_ram_a[o] | m_ram_a[o + 1] << 8 | m_ram_a[o + 2] << 16 | uint32_t(m_ram_a[o + 3]) << 24);
 		}
+		const bool in0 = m_ram_a.size() > 0x7600 && (m_ram_a[0x7483] & 0x08), in1 = m_ram_a.size() > 0x7600 && (m_ram_a[0x7503] & 0x08);
+		if (in0 || in1) {
+			if (!m_run_on) { m_fought.clear(); m_built_run.clear(); m_cpu_akira.clear(); }
+			m_run_on = true;
+			m_run_idle = 0;
+			// (the computer's side's record, in a match: fought)
+			for (int pl = 0; pl < 2; pl++)
+				if (!select && !(pl ? in1 : in0) && (now[pl] >> 16) == 0xfd) m_fought.insert(now[pl]);
+		} else if (m_run_on && !select && ++m_run_idle > 120) {   // (no one in for 2 s: GAME OVER's (a continue's countdown keeps the player in), the run over)
+			m_run_on = false;
+			m_fought.clear();
+			m_built_run.clear();
+			m_cpu_akira.clear();
+		}
 		for (int pl = 0; pl < 2; pl++) {
 			if (now[pl] == m_random_seen[pl]) continue;
 			const uint32_t gone = m_random_seen[pl];
 			m_random_seen[pl] = now[pl];
-			if (gone != 0xfd4f99 && gone != 0xfd3f6f && !cpu_keeps(gone) && gone != now[pl ^ 1] && !select) {
+			if (gone != 0xfd4f99 && gone != 0xfd3f6f && !cpu_keeps(gone) && gone != now[pl ^ 1] && !select && !m_run_on) {
 				random_fighter_make_named(gone);
 				random_fighter_strands();
 				random_fighter_specials();

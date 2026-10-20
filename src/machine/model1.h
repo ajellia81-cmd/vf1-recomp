@@ -8,6 +8,7 @@
 #include <cmath>
 #include <unordered_map>
 #include <unordered_set>
+#include <set>
 #include <array>
 #include <future>
 #include <functional>
@@ -165,6 +166,20 @@ public:
 	void random_fighter_hold_moves();
 	void random_fighter_specials();
 	uint32_t m_random_seen[2] = { 0, 0 };   // (each player's fighter last seen in their block)
+	// (Random opponents: a credit's run, its select to GAME OVER (continues in it): the computer's fighters as they
+	// were fought, kept through a continue's select and shown so in the ending's replays, not made again
+	// nor built again)
+	bool m_run_on = false;
+	int m_run_idle = 0;                   // (frames with no one in)
+	std::set<uint32_t> m_fought;          // (the computer's records this run)
+	std::set<uint32_t> m_built_run;       // (the computer's records built in this run)
+	struct cpu_kept {   // (a random record as it was: its bytes and what it's known by)
+		std::vector<uint8_t> bytes; std::string name; float hue = 0, outfit = 0; int theme = 0; uint32_t stance = 0, list = 0;
+		bool has_hue = false, has_outfit = false, has_stance = false, has_list = false, has_move_ids = false; int voice = -1; std::array<uint8_t, 6> move_ids{};
+	};
+	std::map<uint32_t, cpu_kept> m_cpu_akira;   // (the computer's Akira as fought this run, by record: put back at a continue, onto the one no player has)
+	int m_dural_lm = -2;                  // (Dural's own polygons' light mode, her shine: -2 not looked for yet, -1 none)
+	int dural_lightmode();
 	uint32_t m_cpu_human[2] = { 0, 0 };    // (the records the players picked at the last select: random_fighter_cpu)
 	bool cpu_keeps(uint32_t r) const;
 	void random_fighter_ids();             // (a random record's character number: Akira's in a match, its own outside one)
