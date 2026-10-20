@@ -1195,7 +1195,14 @@ void model1::random_fighter_make(uint32_t rec)
 				if (!n)
 					for (uint32_t t : c.tables)
 						if (n < 32 && rd32(t + 4 * k)) have[n++] = t;
-				if (n) put(k, have[random_next(uint32_t(n))]);
+				// (a command over half the cast leave empty stays empty, as theirs: a few characters' own
+				// extra, tied to their own moves in the group. A punch during the kick (136) is Lau's
+				// punch and Pai's crouching punch, everyone else's an ordinary punch; filled from Pai's,
+				// a random fighter crouched for a punch after any kick. Drawn all the same: the seeds'
+				// other moves as before)
+				int owners = 0;
+				for (uint32_t t : c.tables) owners += rd32(t + 4 * k) != 0;
+				if (n) { const uint32_t pick = have[random_next(uint32_t(n))]; if (owners * 2 >= int(c.tables.size())) put(k, pick); }
 			}
 			for (int i = 0; i < MOVE_SITE_COUNT; i++)
 				if (!MOVE_SITES[i].special && ids[i] == 0xfe && MOVE_SITES[i].command >= g.first && MOVE_SITES[i].command < g.second) ids[i] = table_id[best];
@@ -1374,8 +1381,10 @@ void model1::random_fighter_build(bool select)
 		m_build_models[pl].clear();
 		if ((rec >> 16) != 0xfd) continue;
 		const bool build = !off && playing && m_random_names.count(rec);
+		// (+0e, a few polygons at the waist (a belt's knot), with the torso: left out, it was drawn from
+		// the build's first frame, a dark spot at chest height before anything else)
 		static const std::vector<std::vector<uint32_t>> GROUPS = {
-			{ 0x3e, 0x4a }, { 0x3a, 0x46 }, { 0x36, 0x42 }, { 0x32 }, { 0x12 }, { 0x1a, 0x26 }, { 0x1e, 0x2a } };
+			{ 0x3e, 0x4a }, { 0x3a, 0x46 }, { 0x36, 0x42 }, { 0x32 }, { 0x12, 0x0e }, { 0x1a, 0x26 }, { 0x1e, 0x2a } };
 		auto polys = [&](uint32_t p) {   // (a model's polygons: 10 words each after its first two points, to a type 0)
 			int n = 0;
 			for (uint32_t a = p + 6; n < 4096 && (a + 1) * 4 <= m_regions.polygons.size() && (m_poly_rom[a] & 3); a += 10) n++;
@@ -1388,6 +1397,7 @@ void model1::random_fighter_build(bool select)
 			const uint32_t tab = rd(rec + t);
 			for (uint32_t k = 0; k < 32 && (tab >> 16) == 0xfd; k++) put(poly_of(rd(tab + 4 * k)), 7);
 		}
+		for (uint32_t h : { 0x22u, 0x2eu, 0x76u, 0x7au, 0x7eu }) put(poly_of(rd(rec + h)), 7);   // (the record's own hands: some not in its tables)
 		const uint32_t head = rd(rec + 0x72);
 		if ((head >> 16) == 0xfd || (head >> 16) == 0xf8)
 			for (uint32_t k = 0; k < 121; k++) { const uint32_t p = poly_of(rd(head + 0x40 + 4 * k)); if (!p) break; put(p, 8); }
@@ -1402,20 +1412,26 @@ void model1::random_fighter_build(bool select)
 }
 
 // Whose a model is: the player whose record has it; both (a shared model: Jacky's legs on a random
-// fighter against Jacky), the one whose torso is nearer; -1 neither's
+// fighter against Jacky), the one whose parts were just drawn (the game draws each fighter's parts
+// in a run), unless it's more than twice as far from that one's torso as from the other's (the first
+// of the next fighter's run): by the nearer torso alone, a random fighter's Jacky hair took the other
+// fighter's colours mid-throw, its head nearer the thrower's torso; -1 neither's
 int model1::model_owner(uint32_t poly_adr) const
 {
-	int pl = -1;
+	int pl = -1, owners = 0;
 	for (int k = 0; k < 2; k++) {
 		if (!m_build_models[k].count(poly_adr)) continue;
+		owners++;
 		if (pl >= 0 && m_neck[0].torso && m_neck[1].torso) {
 			const float *T = m_view->translation;
 			auto d2 = [&](const neck_fit &f) { float s = 0; for (int i = 0; i < 3; i++) s += (T[9 + i] - f.t[i]) * (T[9 + i] - f.t[i]); return s; };
-			if (d2(m_neck[k]) < d2(m_neck[pl])) pl = k;
+			pl = d2(m_neck[k]) < d2(m_neck[pl]) ? k : pl;
+			if (const int l = m_owner_last; l >= 0 && d2(m_neck[l]) <= 4 * d2(m_neck[l ^ 1])) pl = l;
 			continue;
 		}
 		if (pl < 0) pl = k;
 	}
+	if (owners < 2) m_owner_last = pl;   // (a model only one has, or scenery: whose run this is)
 	return pl;
 }
 
@@ -2159,7 +2175,10 @@ void model1::ranking_frame()
 				if (names[j].empty() && rec && (rec == m_secret_recs[0] || rec == m_secret_recs[1])) names[j] = record_name(rec);
 			}
 		}
-		for (uint32_t j = 0; j < N; j++) changed = changed || names[j] != m_rank_names[j];
+		// (a named entry's own bytes changed too: its initials typed in after it came in, saved again
+		// so ranking_names.txt holds the entry as the backup does)
+		for (uint32_t j = 0; j < N; j++)
+			changed = changed || names[j] != m_rank_names[j] || (!names[j].empty() && memcmp(m_rank_prev + E * j, now + E * j, E));
 		for (uint32_t j = 0; j < N; j++) m_rank_names[j] = names[j];
 		memcpy(m_rank_prev, now, sizeof m_rank_prev);
 		if (changed) m_rank_version++;
@@ -2213,11 +2232,14 @@ std::string model1::ranking_names() const
 	return out;
 }
 
-// (each line's entry found in the ranking as it is: an entry not there any more is dropped)
+// (each line's entry found in the ranking as it is, else one with its time and character (a file
+// saved before the entry's initials were typed in, as before 1.4.0's fix): an entry not there any
+// more is dropped)
 void model1::set_ranking_names(const std::string &text)
 {
 	if (m_ram_a.size() < RANKING + RANK_ENTRIES * RANK_ENTRY) return;
 	for (auto &n : m_rank_names) n.clear();
+	std::vector<std::pair<std::array<uint8_t, RANK_ENTRY>, std::string>> left;
 	size_t p = 0;
 	while (p < text.size()) {
 		size_t e = text.find('\n', p);
@@ -2236,9 +2258,14 @@ void model1::set_ranking_names(const std::string &text)
 		std::string name;
 		for (char ch : line.substr(2 * RANK_ENTRY + 1)) if ((ch >= 'A' && ch <= 'Z') || ch == '?') name += ch;
 		if (!ok || name.empty()) continue;
-		for (uint32_t j = 0; j < RANK_ENTRIES; j++)
-			if (m_rank_names[j].empty() && !memcmp(&m_ram_a[RANKING + RANK_ENTRY * j], entry, RANK_ENTRY)) { m_rank_names[j] = name.substr(0, 10); break; }
+		bool found = false;
+		for (uint32_t j = 0; j < RANK_ENTRIES && !found; j++)
+			if (m_rank_names[j].empty() && !memcmp(&m_ram_a[RANKING + RANK_ENTRY * j], entry, RANK_ENTRY)) { m_rank_names[j] = name.substr(0, 10); found = true; }
+		if (!found) { std::array<uint8_t, RANK_ENTRY> a; memcpy(a.data(), entry, RANK_ENTRY); left.push_back({ a, name.substr(0, 10) }); }
 	}
+	for (const auto &[entry, name] : left)
+		for (uint32_t j = 0; j < RANK_ENTRIES; j++)
+			if (m_rank_names[j].empty() && !memcmp(&m_ram_a[RANKING + RANK_ENTRY * j], entry.data(), 6)) { m_rank_names[j] = name; m_rank_version++; break; }
 	memcpy(m_rank_prev, &m_ram_a[RANKING], sizeof m_rank_prev);
 	m_rank_seen = true;
 }

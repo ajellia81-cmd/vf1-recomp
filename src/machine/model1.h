@@ -234,6 +234,7 @@ public:
 		float pitch = 0, rel[9] = {}, view[9] = {}; int pitch_seen = 0;   // TESTONLY (VF_HEADLOG): the head against its torso, and as drawn
 	};
 	neck_fit m_neck[2];
+	mutable int m_owner_last = -1;   // (the player whose model was drawn last, not a shared one: model_owner)
 	uint32_t m_torso_poly[2] = { 0, 0 };
 	int m_torso_seen = 0;
 	std::unordered_map<uint32_t, std::vector<std::array<float, 3>>> m_model_points;   // (a model's own points, by its poly address)
@@ -505,6 +506,9 @@ private:
 		uint16_t hscr = 0, vscr = 0;                 // the sky map's scroll
 		std::vector<struct slot> slots;              // matrix commands and the objects drawn with each
 		int objects = 0;
+		double move = -1;                            // how far the parts moved from the list before, the median (-1: not the same parts)
+		double carried = 0;                          // still: the move before it, carried on through it
+		bool still = false;                          // nothing moved, a list after everything did: an update the game skipped
 		uint16_t moves[2] = { 0, 0 };                // (Random fighter) each player's move, and their slots
 		std::vector<int> mine[2];                    // (each random fighter's slots: its parts, head and strands)
 		int root[2] = { -1, -1 };                    // (and the one of its hips, in those)
@@ -516,6 +520,7 @@ private:
 	};
 	// Random fighter: a random fighter's change of move, its old pose eased into the new one (each
 	// part's turn and place about the hips, the difference fading out): pose_offsets
+	static double list_move(const logic_frame &a, const logic_frame &b);
 	struct pose_offset {
 		std::vector<std::array<float, 7>> o;          // a turn (quaternion) and a move per slot, about the hips
 		std::vector<uint64_t> key;                   // each one's part: its first model, and which of that model's (the order the game draws them in can change)
@@ -573,6 +578,12 @@ private:
 	void blend_slots(const logic_frame &a, const logic_frame &b, double alpha);
 	int repair_by_camera(const logic_frame &a, const logic_frame &b, std::vector<int> &pair, const std::vector<char> &changed_run);
 	bool m_camera_cut = false;    // (repair_by_camera: the camera's move between the two lists is a cut)
+	int m_still_carried = -1;            // (the skipped update carried through, render_smooth: the next list catches up)
+	bool m_camera_sure = false;          // (the camera's move known from the pair before and no cut: a part jumped only off it)
+	std::vector<float> m_cam_res;        // (each slot's move off the camera's, over its depth; -1 none)
+	struct cam_move { int from = -1, to = -1; double d[3] = {}; double turn = 0, ratio = 0; };   // (between two lists: the scenery's mean shift, the turn, the shift over the depth)
+	cam_move m_cam_move[16];       // (the last few pairs', by the newer list's frame: a shift like the last pair's is a swing, not a cut)
+	int m_cam_move_next = 0;
 	void index_objects(logic_frame &lf);
 	void record_frame();
 	bool smooth_matrix(uint32_t poly_adr, float *out);

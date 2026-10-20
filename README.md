@@ -66,6 +66,9 @@ your screen's refresh rate.
 <p align="center">
   <a href="https://youtu.be/9H62laX0VAI"><img src="https://img.youtube.com/vi/9H62laX0VAI/maxresdefault.jpg" alt="Watch: Virtua Fighter 1 But Every Character Is Randomized" width="800"></a>
 </p>
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/c3c5aa9a-f720-4338-aec1-52656214b68c" alt="Random fighters: a lineup of them over the game" width="800">
+</p>
 
 Menu > Cheats > **Player 1 fighter** (and **Player 2 fighter**):
 

@@ -840,6 +840,7 @@ int main(int argc, char **argv)
 	load_blob(ee_path, m.eeprom(), model1::EEPROM_SIZE);
 	// the ranking's names for random fighters and secret characters (model1::ranking_frame), beside the backup
 	const std::string rank_path = dir + "/ranking_names.txt";
+	uint32_t rank_saved = m.ranking_names_version();   // (a name found by its time and character at the load: saved again)
 	if (FILE *f = fopen(rank_path.c_str(), "rb")) {
 		std::string text;
 		char buf[4096];
@@ -847,7 +848,6 @@ int main(int argc, char **argv)
 		fclose(f);
 		m.set_ranking_names(text);
 	}
-	uint32_t rank_saved = m.ranking_names_version();
 	auto save_rank_names = [&] {
 		if (m.ranking_names_version() == rank_saved) return;
 		const std::string text = m.ranking_names();
@@ -2082,7 +2082,15 @@ int main(int argc, char **argv)
 	double frame_clock = 0, queue_avg = QUEUED * frame_bytes;
 	int64_t game_run = 0;                    // frames run by the loop
 	uint64_t clock_t = SDL_GetTicksNS();
-	auto restart_clock = [&] { clock_t = SDL_GetTicksNS(); frame_clock = double(game_run); };
+	// A picture each refresh with smooth motion (from VF3, 73c4b27 and 90d61ae): the clock moves the
+	// refreshes each pass took, pulled a tenth of the way to the real clock (more than 2 refreshes off,
+	// a real hitch: taken whole). By the real clock each picture showed the game where it was when its
+	// pass began, early or late in the refresh as the last pass's work took (the frame run during the
+	// present's wait, a picture's drawing), and shown a refresh apart the motion wobbled. Only while the
+	// passes keep to the screen's refreshes, a whole number of them apart on average: not with vsync
+	// off or not honoured, nor a minimised or covered window; never back. VF_NO_EVEN_PACE=1: as before.
+	double even_real = 0, even_shown = 0, pass_avg = 0;
+	auto restart_clock = [&] { clock_t = SDL_GetTicksNS(); frame_clock = double(game_run); even_real = even_shown = 0; };
 	int shot = 0;
 	// testing: VF_QUIT_AFTER=n runs n frames, saves build/host_last.png (the game's frame) and
 	// build/host_window.png (the window, menu and all) and quits; VF_MENU_KEYS="esc,down,enter"
@@ -2139,6 +2147,7 @@ int main(int argc, char **argv)
 	bool carried_curtain = false;      // (a curtain from the frame run during the last present)
 	bool carried_on_gpu = false;       // (... and put together by the GPU)
 	double screen_hz_now = 0;          // (the screen's Hz, looked up each second)
+	bool vsync_now = true;             // (vsync forced off, or not taken: present returns at once, so not every pass)
 	// A game frame's inputs (false: a hotkey opened the menu, no frame runs) and what follows one: the
 	// scene changes' hold, its sound
 	auto frame_inputs = [&]() -> bool {
@@ -2353,8 +2362,24 @@ int main(int argc, char **argv)
 			// testing: VF_STEP_HZ=n steps the game's clock 1/n s a pass, whatever the time the pass took (with
 			// VF_HIDDEN, VF_HZ high and VF_CAPTURE: every in-between picture, on a machine too slow to keep up)
 			static const double fixed_dt = getenv("VF_STEP_HZ") ? 1.0 / atof(getenv("VF_STEP_HZ")) : 0;
-			const double dt = fixed_dt > 0 ? fixed_dt : double(now_ns - clock_t) / 1e9;
+			double dt = fixed_dt > 0 ? fixed_dt : double(now_ns - clock_t) / 1e9;
 			clock_t = now_ns;
+			{   // (even steps: above, at frame_clock)
+				static const bool no_even = getenv("VF_NO_EVEN_PACE") != nullptr;
+				pass_avg += (dt - pass_avg) * 0.05;
+				const double per = pass_avg * screen_hz_now, whole = std::round(per);
+				const bool unseen_now = SDL_GetWindowFlags(win) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED);
+				if (!no_even && fixed_dt == 0 && m.smooth() && !hidden && !unseen_now && vsync_now && screen_hz_now > 0 &&
+					whole >= 1 && std::fabs(per - whole) < 0.12) {
+					const double unit = 1.0 / screen_hz_now, step = std::max(1.0, std::round(dt * screen_hz_now)) * unit;
+					even_real += dt;
+					const double behind = even_real - even_shown;
+					dt = std::fabs(behind - step) > 2 * unit ? behind : step + (behind - step) * 0.1;
+					dt = std::max(0.0, dt);
+					even_shown += dt;
+					if (even_shown > 1e6) { even_real -= even_shown; even_shown = 0; }   // (kept small)
+				} else even_real = even_shown = 0;
+			}
 			double rate = FRAME_HZ;
 			int low = 0;                         // frames the sound needs at once (it's nearly run dry)
 			bool sound_full = false;             // over 300 ms queued: no frames run this pass
@@ -2438,7 +2463,7 @@ int main(int argc, char **argv)
 			// budget, refilled by a clock that drifts against the screen's, skipped one now and then: a
 			// refresh's stutter. VF3's d2265b3)
 			double &screen_hz = screen_hz_now;
-			static bool vsync_on = true;   // (vsync forced off, or not taken: present returns at once, so not every pass)
+			bool &vsync_on = vsync_now;
 			{ static uint64_t hz_t = 0;
 			  if (SDL_GetTicksNS() - hz_t > 1000000000ull) {
 				  hz_t = SDL_GetTicksNS();

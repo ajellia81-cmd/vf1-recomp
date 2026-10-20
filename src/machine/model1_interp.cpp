@@ -111,6 +111,16 @@ void model1::record_frame()
 		objects = lf.objects;
 		static const bool log = getenv("VF_LOG_SMOOTH") != nullptr;
 		if (lf.hash != m_logic[1].hash) {
+			// A list with nothing in it moved (the camera, the fighters), a list after one where
+			// they all moved: the game missed an update (the attract's throws close in), the next
+			// list catching up two lists' move. Blended, the picture stood a game frame (4 refreshes
+			// at 120 Hz) then went on at twice the speed: a judder at the close-ups (render_smooth).
+			const logic_frame &z = m_logic[0], &a = m_logic[1];
+			lf.move = list_move(a, lf);
+			// (nearly nothing moved, the skips 1-3% of the move before: an ordinary move, not a cut's
+			// or a fast swing's, after which the camera often stands)
+			lf.still = lf.move >= 0 && a.move > 0.01 && a.move < 0.3 && lf.move < 0.05 * a.move && !z.list.empty() && lf.frame - a.frame == a.frame - z.frame;
+			lf.carried = lf.still ? a.move : 0;
 			m_logic_prev = std::move(m_logic[0]);
 			m_logic[0] = std::move(m_logic[1]);
 			m_logic[1] = std::move(lf);
@@ -144,6 +154,24 @@ void model1::record_frame()
 			m_frame_parts = false;
 		}
 	}
+}
+
+// How far the parts moved between two lists of the same parts (each slot's first model the same,
+// in order): the median of their moves (a fast limb or two don't count), else -1.
+double model1::list_move(const logic_frame &a, const logic_frame &b)
+{
+	if (a.slots.size() != b.slots.size() || a.slots.empty()) return -1;
+	std::vector<double> d;
+	for (size_t i = 0; i < a.slots.size(); i++) {
+		const slot &sa = a.slots[i], &sb = b.slots[i];
+		if (sa.polys.empty() != sb.polys.empty() || (!sa.polys.empty() && sa.polys[0] != sb.polys[0])) return -1;
+		if (sa.polys.empty()) continue;
+		const double dx = sb.mat[9] - sa.mat[9], dy = sb.mat[10] - sa.mat[10], dz = sb.mat[11] - sa.mat[11];
+		d.push_back(std::sqrt(dx * dx + dy * dy + dz * dz));
+	}
+	if (d.empty()) return -1;
+	std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+	return d[d.size() / 2];
 }
 
 void model1::smooth_cut()
@@ -181,15 +209,29 @@ bool model1::render_smooth(double now, bool shown)
 	// A cut can't be blended: the older view stays until the newer one's moment (as the blend
 	// would), so the cut lands when the game's sky, written two frames later, changes too. It
 	// stood still meanwhile, a game frame (4 refreshes at 120 Hz) at every camera cut; now it
-	// carries on from the list before it as it was moving and eases to a stop at the cut, half
-	// a game frame's move on at most (straight on, a fast camera swung into views the game never
+	// carries on from the list before it as it was moving, easing to half speed at the cut, three
+	// quarters of a list on at most (straight on, a fast camera swung into views the game never
 	// showed).
+	// An update the game skipped (a list with nothing moved, record_frame) carries on the same
+	// way, the move before it eased out over it (half a list's move), and the list after starts
+	// from there, catching up the rest: no stop, no lurch.
 	const bool cut = m_blend_cut;
-	m_replay_older = cut && alpha < 1;
+	if (!cut && a.still && a.frame == m_still_carried && alpha < 1 && b.move > 0) {
+		alpha += (1 - alpha) * std::min(0.5, 0.5 * a.carried / b.move);
+		blend_slots(a, b, alpha);
+		m_alpha = float(alpha);
+		if (!m_redrawing) m_last_alpha = m_alpha;
+	}
+	// (and carries on through it until the next list is in, a frame late at times)
+	// (Into a cut, three quarters of a list on, slowing to half speed as the cut lands: eased to a
+	// stop, the last refreshes before every cut stood still)
+	m_replay_older = (cut && alpha < 1) || b.still;
 	m_replay_extra = false;
 	if (m_replay_older && !m_logic_prev.list.empty() && b.frame - a.frame == a.frame - m_logic_prev.frame) {
-		blend_slots(m_logic_prev, a, 1 + 0.5 * (1 - (1 - alpha) * (1 - alpha)));
+		const double c = std::min(alpha, 1.0);
+		blend_slots(m_logic_prev, a, 1 + (cut ? c - 0.25 * c * c : 0.5 * (1 - (1 - c) * (1 - c))));
 		m_replay_extra = !m_blend_cut;
+		if (!cut && m_replay_extra) m_still_carried = b.frame;   // (the list after it catches up from there)
 	}
 	m_blend_cut = cut;
 	if (cut && b.frame != m_cut_frame) m_cut_frame = b.frame;
@@ -200,12 +242,15 @@ bool model1::render_smooth(double now, bool shown)
 	// (smooth_sky_shift).
 	// (the camera's RAM has the new view from the cut's frame on; the scroll the game writes
 	// follows it a frame later, mixed with the old view's, and lands one or two frames after that)
+	// Where it lands is too far to move the sky to (the tile layer moves 24 pixels at most, a
+	// panorama 160; a cut swings it hundreds, up or down too): the sky as the game has it, as the
+	// arcade shows it. The picture before the cut used to stay instead, 1-9 refreshes at a replay's
+	// cuts (up to 100 ms with the hold before the cut), mostly for views looking down at the floor
+	// with no sky in them.
 	m_sky_settling_now = false;
 	if (!m_replay_older && m_cut_frame >= 0 && int(m_frame) - 1 <= m_cut_frame + 4) {
 		const sky_sample &cur = m_sky_hist[(m_frame - 1) % SKY_HIST];
-		m_sky_settling_now = cur.frame == int(m_frame) - 1 && (cur.lands_h != cur.h || cur.lands_v != cur.v);
-		// (the tile layer moves 24 pixels at most: further, the picture before the cut stays a frame)
-		if (m_sky_settling_now && !m_redrawing && !sky_reaches(cur)) { m_replaying = false; m_alpha = 1; return false; }
+		m_sky_settling_now = cur.frame == int(m_frame) - 1 && (cur.lands_h != cur.h || cur.lands_v != cur.v) && sky_reaches(cur);
 	}
 	if (!m_redrawing) {
 		// testing: where the 3D is in this picture, on average (the trace's check that each picture
@@ -365,16 +410,72 @@ int model1::repair_by_camera(const logic_frame &a, const logic_frame &b, std::ve
 	// shift of over 8.5% of the scenery's depth (a game's fastest swing, a knockdown's, turns it 11
 	// degrees and shifts it 7.7%). The parts mostly stay close (a cut to the same fighters from
 	// another side: TIME OVER's far view to the one from above), and blending them drew views
-	// between the two that the game never showed.
+	// between the two that the game never showed. Close in (the attract's last move, a replay's
+	// camera swung in to the fighters) the scenery's depth is small: an ordinary swing passed 8.5%
+	// pair after pair, and the close-up went unblended, stepping at the game's 30 a second while
+	// the counter said 120. So a shift of 8.5-25% is a cut only out of a still camera (the last
+	// pair's under 3%: a fight's camera speeding up from 4-6% to 10% was taken for one) and unlike
+	// the last pair's (about as far, the same way: a swing carrying on); over 25%, or a turn over
+	// 15 degrees, always. (Attract, 6000 frames: every cut was over 25% or 15 degrees, every swing
+	// taken for one under 17%.)
 	{
 		const double tr = std::clamp((R[0][0] + R[1][1] + R[2][2] - 1) / 2, -1.0, 1.0);
-		double mv = 0, dp = 0;
+		double mv = 0, dp = 0, d[3] = {};
+		int n = 0;
 		for (size_t i = 0; i < P.size(); i++)
 			if (use[i]) {
 				mv += std::sqrt((Q[i].x - P[i].x) * (Q[i].x - P[i].x) + (Q[i].y - P[i].y) * (Q[i].y - P[i].y) + (Q[i].z - P[i].z) * (Q[i].z - P[i].z));
 				dp += std::max(std::fabs(P[i].z), 1.0);
+				d[0] += Q[i].x - P[i].x; d[1] += Q[i].y - P[i].y; d[2] += Q[i].z - P[i].z; n++;
 			}
-		m_camera_cut = std::acos(tr) > 15 * M_PI / 180 || (dp > 0 && mv > 0.085 * dp);
+		const double turn = std::acos(tr) * 180 / M_PI;
+		if (n) for (double &v : d) v /= n;
+		// (pairs can come out of order, the next frame's run ahead while the screen waits: the last
+		// pair's move is the one that ended at this pair's older list)
+		cam_move *slot = nullptr;
+		for (cam_move &c : m_cam_move) if (c.to == b.frame) slot = &c;
+		if (!slot) { slot = &m_cam_move[m_cam_move_next]; m_cam_move_next = (m_cam_move_next + 1) % int(std::size(m_cam_move)); }
+		const double ratio = dp > 0 ? mv / dp : 0;
+		*slot = { a.frame, b.frame, { d[0], d[1], d[2] }, turn, ratio };
+		static const cam_move none;
+		const cam_move *found = &none;
+		for (const cam_move &c : m_cam_move)   // (that one, else the latest a few frames before it)
+			if (c.to <= a.frame && c.to >= a.frame - 4 && c.to < b.frame && (found == &none || c.to > found->to)) found = &c;
+		const cam_move &pv = *found;
+		const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), plen = std::sqrt(pv.d[0] * pv.d[0] + pv.d[1] * pv.d[1] + pv.d[2] * pv.d[2]);
+		const double diff = std::sqrt((d[0] - pv.d[0]) * (d[0] - pv.d[0]) + (d[1] - pv.d[1]) * (d[1] - pv.d[1]) + (d[2] - pv.d[2]) * (d[2] - pv.d[2]));
+		const bool known = found != &none;
+		const bool swing = known && n && diff < 0.5 * std::max(len, plen) && turn < 2 * pv.turn + 3;
+		const bool moving = known && pv.ratio > 0.03;
+		// (a turn the parts' places fit that their own axes didn't make: close in on a throw the
+		// fighters' parts are most of the list, and the thrown one's swing over fit as a turn of
+		// the camera's, 21 degrees, while the stage and the thrower kept theirs. The camera's turn
+		// turns every part's axes with it, the fighters' too in a frame or two. A fit turned over
+		// 5 degrees that the axes didn't follow isn't the camera's: nor is its move.)
+		bool turned_all = true;
+		if (turn > 5) {
+			int with[2] = { 0, 0 }, n_axes = 0;
+			for (size_t i = 0; i < P.size(); i++) {
+				const float *ma = a.slots[pair[K[i]]].mat, *mb = b.slots[K[i]].mat;
+				n_axes++;
+				for (int conv = 0; conv < 2; conv++) {
+					bool ok = true;
+					for (int c = 0; c < 3 && ok; c++) {
+						// (the axes as the triples or as the columns of the matrix: whichever the camera's turn turns)
+						double u[3], v[3], w[3] = {};
+						for (int r = 0; r < 3; r++) { u[r] = conv ? ma[3 * r + c] : ma[3 * c + r]; v[r] = conv ? mb[3 * r + c] : mb[3 * c + r]; }
+						for (int r = 0; r < 3; r++) w[r] = R[r][0] * u[0] + R[r][1] * u[1] + R[r][2] * u[2];
+						const double lw = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]), lv = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+						ok = lw > 0 && lv > 0 && (w[0] * v[0] + w[1] * v[1] + w[2] * v[2]) > 0.985 * lw * lv;   // (within 10 degrees)
+					}
+					with[conv] += ok;
+				}
+			}
+			turned_all = std::max(with[0], with[1]) * 2 > n_axes;
+		}
+		m_camera_cut = (turn > 15 && turned_all) || ratio > 0.25 || (ratio > 0.085 && !swing && !moving && turned_all);
+		m_camera_sure = known && !m_camera_cut;
+		for (size_t i = 0; i < P.size(); i++) m_cam_res[K[i]] = float(res[i]);
 	}
 	int repaired = 0;
 	for (size_t i = 0; i < P.size(); i++) {
@@ -516,10 +617,13 @@ void model1::blend_slots(const logic_frame &a, const logic_frame &b, double alph
 		else pair[j++] = int(i++);                           // the same place, a different model
 	}
 	m_camera_cut = false;
+	m_camera_sure = false;
+	m_cam_res.assign(nb, -1);
 	repaired += repair_by_camera(a, b, pair, changed_run);
 	static const bool logp = getenv("VF_LOG_SMOOTH") != nullptr;
 	if (logp && repaired && !m_redrawing) fprintf(stderr, "P frame %d repaired %d\n", b.frame, repaired);
 	int jumps = 0, paired = 0, missing = 0;
+	std::vector<char> jumped(b.slots.size(), 0);
 	for (size_t i = 0; i < b.slots.size(); i++) {
 		if (pair[i] == -2) continue;                       // (scenery that came into the list: at the newer place)
 		if (pair[i] < 0 && !b.slots[i].polys.empty()) missing++;
@@ -537,7 +641,7 @@ void model1::blend_slots(const logic_frame &a, const logic_frame &b, double alph
 			const float dot = pa[r] * pb[r] + pa[r + 1] * pb[r + 1] + pa[r + 2] * pb[r + 2];
 			if (la > 0 && lb > 0 && dot < 0.77f * std::sqrt(la * lb)) turned = true;     // over ~40 degrees
 		}
-		if (dx * dx + dy * dy + dz * dz > 0.09f * depth * depth || turned) jumps++;    // fast, or a cut
+		if (dx * dx + dy * dy + dz * dz > 0.09f * depth * depth || turned) jumps++, jumped[i] = 1;    // fast, or a cut
 		for (int k = 0; k < 12; k++) m_blend[i][k] = float(pa[k] + (pb[k] - pa[k]) * alpha);
 		static const bool no_turn = getenv("VF_NO_TURN_BLEND") != nullptr;   // TESTONLY
 		if (!no_turn && swung(pa, pb)) turn_blend(pa, pb, alpha, m_blend[i].data());
@@ -552,20 +656,30 @@ void model1::blend_slots(const logic_frame &a, const logic_frame &b, double alph
 	// hat knocked off, Jeff's cap and shades) are drawn where the newer frame has them, the rest
 	// blended: as a cut, the picture carried on past the newer list, and the fighters' fast-turning
 	// limbs came out stretched (a kick that knocked Pai's hat off), or, made rigid, apart.
-	m_blend_cut = jumps * 2 > paired || missing * 8 > paired || m_camera_cut;
+	// (When the camera's move is known and is no cut, a part jumped only if it moved far off the
+	// camera's move: close in (depth under 1, the camera a fighter's width away) its swing past
+	// moved most parts over 30%, and fighters spinning in a throw turned most of theirs over 40
+	// degrees, each taken for a cut: the picture stood 2 game frames and lurched.)
+	int cut_jumps = jumps;
+	if (m_camera_sure) {
+		cut_jumps = 0;
+		for (size_t i = 0; i < b.slots.size(); i++) cut_jumps += m_blend_ok[i] && m_cam_res[i] > 0.3f;
+	}
+	m_blend_cut = cut_jumps * 2 > paired || missing * 8 > paired || m_camera_cut;
 	// Carried on past the newer list (blend_slots(older, newer, 1 to 1.5) at a cut, half a game frame
 	// on at most): each part's own blend carried on grew the fast-turning ones (a kicking leg up to
 	// twice its length) and moved each by itself, apart from the next (made rigid, a hand came off
 	// its wrist). Every part is drawn as the newer list has it, all moved on together by the parts'
-	// average move between the two lists: the whole picture carries on, nothing comes apart. Only
-	// when nothing moved fast: a camera swinging into a cut (TIME OVER's), a body mid-throw or a
-	// kicking leg carried on into views and poses the game never showed, so then the newer list
-	// is held as it is until the cut.
+	// average move between the two lists: the whole picture carries on, nothing comes apart. The
+	// parts that moved fast (a camera swinging into a cut, TIME OVER's; a body mid-throw, a kicking
+	// leg) are left out of the average, carried with the rest: their own move carried on went into
+	// views and poses the game never showed. (The newer list was held as it was until the cut when
+	// any part moved fast: one kicking leg, and the picture stood a list before most cuts.)
 	if (alpha > 1 && !m_blend_cut) {
 		double mv[3] = {};
 		int n = 0;
-		for (size_t i = 0; i < b.slots.size() && !jumps; i++)
-			if (m_blend_ok[i]) { for (int k = 0; k < 3; k++) mv[k] += m_blend_to[i][9 + k] - m_blend_from[i][9 + k]; n++; }
+		for (size_t i = 0; i < b.slots.size(); i++)
+			if (m_blend_ok[i] && !jumped[i]) { for (int k = 0; k < 3; k++) mv[k] += m_blend_to[i][9 + k] - m_blend_from[i][9 + k]; n++; }
 		for (size_t i = 0; i < b.slots.size(); i++)
 			if (m_blend_ok[i]) {
 				memcpy(m_blend[i].data(), m_blend_to[i].data(), 12 * sizeof(float));
