@@ -48,7 +48,7 @@ cp assets/icon/icon.png $P/icon.png
 cp tools/deck/README.txt tools/deck/VirtuaFighter.sh $P/
 [ -f build/release/LICENSES.txt ] && cp build/release/LICENSES.txt $P/
 chmod +x $P/vf $P/VirtuaFighter.sh
-tar czf $D/VirtuaFighter-deck.tar.gz -C $D VirtuaFighter
+tar czf $D/VirtuaFighterRecomp-deck.tar.gz -C $D VirtuaFighter
 
 # DECK_FAST=1: a second package for comparing speed, the same game built -O3 for the Deck's CPU
 # (Zen 2: AVX2), with no fused multiply-adds so every result is the same as the normal build's
@@ -62,7 +62,7 @@ if [ -n "$DECK_FAST" ]; then
 	F=$D/VirtuaFighter-fast
 	rm -rf $F && cp -R $P $F
 	cp $D/bin-fast/vf-native $F/vf && strip $F/vf
-	tar czf $D/VirtuaFighter-deck-fast.tar.gz -C $D VirtuaFighter-fast
-	ls -la $D/VirtuaFighter-deck-fast.tar.gz
+	tar czf $D/VirtuaFighterRecomp-deck-fast.tar.gz -C $D VirtuaFighter-fast
+	ls -la $D/VirtuaFighterRecomp-deck-fast.tar.gz
 fi
-ls -la $P $D/VirtuaFighter-deck.tar.gz
+ls -la $P $D/VirtuaFighterRecomp-deck.tar.gz

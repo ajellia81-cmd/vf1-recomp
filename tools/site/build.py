@@ -96,7 +96,7 @@ def main():
     dl = os.path.join(OUT, 'downloads')
     os.makedirs(dl, exist_ok=True)
     mac_src = os.path.join(ROOT, 'build', 'release', 'VirtuaFighterRecomp-mac.zip')
-    deck_src = os.path.join(ROOT, 'build', 'deck', 'VirtuaFighter-deck.tar.gz')
+    deck_src = os.path.join(ROOT, 'build', 'deck', 'VirtuaFighterRecomp-deck.tar.gz')
     win_src = os.path.join(ROOT, 'build', 'win', 'VirtuaFighterRecomp-windows.zip')
     for src in (mac_src, deck_src, win_src):
         if not carries(src, args.version):

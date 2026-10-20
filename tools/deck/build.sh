@@ -2,7 +2,7 @@
 # Builds the Steam Deck package (SteamOS: x86-64 Linux) in Valve's Steam Runtime 3 "sniper"
 # SDK container, so the binary runs against the libraries every Steam install has.
 #
-#   tools/deck/build.sh        -> build/deck/VirtuaFighter/ and build/deck/VirtuaFighter-deck.tar.gz
+#   tools/deck/build.sh        -> build/deck/VirtuaFighter/ and build/deck/VirtuaFighterRecomp-deck.tar.gz
 #
 # Needs Docker able to run linux/amd64 images. The package has nothing from the ROMs in it: the
 # player puts their own vf.zip in VirtuaFighter/roms/ and the game recompiles it when it starts.
