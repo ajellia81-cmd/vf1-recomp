@@ -76,6 +76,7 @@ private:
 	void move(int d);
 	void select(int i);
 	void change(int d);
+	void click_change(int d);   // (a mouse click on a choice)
 	void activate();
 	void clear();
 	friend struct menu_listener;

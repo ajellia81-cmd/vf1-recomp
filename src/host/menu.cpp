@@ -40,8 +40,9 @@ struct menu_listener : Rml::EventListener
 		menu->select(i);
 		if (ev.GetId() == Rml::EventId::Click) {
 			const menu_item &it = menu->m_stack.back().items[i];
+			Rml::Element *t = ev.GetTargetElement();
 			if (it.activate) menu->activate();
-			else if (it.change) menu->change(+1);
+			else if (it.change) menu->click_change(t && t->IsClassSet("back") ? -1 : +1);   // (the "<" steps back)
 		}
 	}
 };
@@ -180,7 +181,7 @@ void game_menu::build()
 		if (it.value) {
 			rml += "<span class=\"value\">";
 			const bool arrows = it.change && !(m_capture && int(i) == m_sel);   // (not while it's being typed into)
-			if (arrows) rml += "<span class=\"arrow\">&lt;&nbsp;&nbsp;</span>";
+			if (arrows) rml += "<span class=\"arrow back\">&lt;&nbsp;&nbsp;</span>";
 			rml += escape(it.value());
 			if (arrows) rml += "<span class=\"arrow\">&nbsp;&nbsp;&gt;</span>";
 			rml += "</span>";
@@ -246,6 +247,18 @@ void game_menu::move(int d)
 		i = (i + d + n) % n;
 		if (!p.items[i].info) { select(i); return; }
 	}
+}
+
+// A click on a choice: "<" steps back, the rest of the row forward; at either end a click goes round
+// to the other (choices that stop at their ends, a render scale at 6x or the hardest difficulty, were
+// stuck there for a mouse: every click stepped forward, even on "<". vf3-recomp #3)
+void game_menu::click_change(int d)
+{
+	auto value = [&] { const menu_item &it = m_stack.back().items[m_sel]; return it.value ? it.value() : std::string(); };
+	const std::string was = value();
+	change(d);
+	if (value() != was) return;
+	for (int n = 0; n < 64; n++) { const std::string at = value(); change(-d); if (value() == at) break; }
 }
 
 void game_menu::change(int d)

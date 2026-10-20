@@ -108,6 +108,11 @@ def main():
     shutil.rmtree(dl)
     gh = 'https://github.com/mr-finster/vf1-recomp/releases/latest/download/'
     open(os.path.join(OUT, '_redirects'), 'w').write(''.join(f'/downloads/{f} {gh}{f} 302\n' for f in (mac, deck, win)))
+    # a real 404 for any other path: without one Pages answers every unknown path with the page itself
+    # (a 200), and a crawler following its relative links from a made-up path went ever deeper
+    # (/img/shots/img/shots/...): VF3's site took 184,000 page loads in two hours that way (19 Oct)
+    open(os.path.join(OUT, '404.html'), 'w').write('<!doctype html><meta charset="utf-8"><title>Not found</title>'
+        '<p style="font:16px sans-serif;padding:2em">Not found. <a href="/">Virtua Fighter Recomp</a></p>\n')
 
     # the marquee (the app icon's letters, drawn wide) and the page icons
     img = os.path.join(OUT, 'img')
