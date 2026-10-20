@@ -358,6 +358,7 @@ struct settings
 {
 	int scale = 2, aspect = 0, volume = 100, music = 100, effects = 100, aa = 1, filter = 0, ring = 0;
 	int renderer3d = 2;     // the 3D's renderer: 0 the CPU, 1 the GPU, 2 Auto (whichever is quicker here)
+	int graphics = 0;       // Windows: the GPU's driver, from the next start: 0 Auto (Vulkan first, Direct3D 12 if it won't start), 1 Direct3D 12
 	int akira_slot = 0;     // Cheats: who plays in Akira's place (model1::UNUSED_CHARACTERS; 0 Akira)
 	bool random_cpu = false;   // Cheats: with Random fighter, the computer's every opponent a random fighter too
 	int random_fighter = 0;   // (Cheats: any random fighter, a player's or the computer's: over akira_slot; from random_player and random_cpu)
@@ -405,6 +406,7 @@ struct settings
 		flag("show_fps", show_fps);
 		num("arcade_coins", arcade_coin, -1, 0xffff);
 		num("renderer_3d", renderer3d, 0, 2);
+		num("graphics", graphics, 0, 1);
 		num("akira_slot", akira_slot, 0, int(std::size(model1::UNUSED_CHARACTERS)) - 1);
 		num("random_fighter", random_fighter, 0, 2);   // (0 off, else on: 2 was "Looks + moves", now what on is)
 		flag("random_opponents", random_cpu);
@@ -461,6 +463,7 @@ struct settings
 				int(fullscreen), int(timings), volume, int(arcade), int(smooth_bg), music, effects, aa, int(show_fps), filter, ring);
 		if (arcade_coin >= 0) fprintf(f, "arcade_coins = %d\n", arcade_coin);
 		fprintf(f, "renderer_3d = %d\n", renderer3d);
+		if (graphics) fprintf(f, "graphics = %d\n", graphics);
 		if (akira_slot) fprintf(f, "akira_slot = %d\n", akira_slot);
 		for (int p = 0; p < 2; p++) {
 			if (!random_player[p].empty()) fprintf(f, "random_p%d = %s\n", p + 1, random_player[p].c_str());
@@ -1009,14 +1012,17 @@ int main(int argc, char **argv)
 	// SDL's own, chooses over this; VF_NO_GPU_RENDERER=1 skips it, tests. A start that closed while
 	// starting it leaves gpu-start.crashed, as the 3D's own start does below: SDL's usual one then.)
 	const std::string gpu_marker = dir + "/gpu-start.crashed";
-	const bool vk_first = !getenv("SDL_GPU_DRIVER") && gpu3d_prefer_vulkan();
+	// (Windows: Vulkan first on any card, unless Graphics driver is Direct3D 12; SDL_GPU_DRIVER chooses over both)
+	const bool vk_first = !getenv("SDL_GPU_DRIVER") && cfg.graphics == 0 && gpu3d_prefer_vulkan();
+	bool ren_vk = false;   // (the gpu renderer started on Vulkan, chosen first)
 	if (cfg.renderer3d != 0 && !getenv("SDL_RENDER_DRIVER") && !getenv("VF_NO_GPU_RENDERER") && !SDL_GetPathInfo(gpu_marker.c_str(), nullptr)) {
 		if (SDL_IOStream *io = SDL_IOFromFile(gpu_marker.c_str(), "w")) SDL_CloseIO(io);
-		// (an AMD card on Windows: Vulkan first, Direct3D 12 if it won't start, gpu3d_prefer_vulkan)
+		// (Windows: Vulkan first, Direct3D 12 if it won't start, gpu3d_prefer_vulkan)
 		if (vk_first) {
 			SDL_SetHint(SDL_HINT_GPU_DRIVER, "vulkan");
 			ren = SDL_CreateRenderer(win, "gpu");
-			fprintf(stderr, "SDL's gpu renderer: Vulkan (an AMD card): %s\n", ren ? "started" : SDL_GetError());
+			ren_vk = ren != nullptr;
+			fprintf(stderr, "SDL's gpu renderer: Vulkan (Windows, first): %s\n", ren ? "started" : SDL_GetError());
 			SDL_ResetHint(SDL_HINT_GPU_DRIVER);
 		}
 		if (!ren) ren = SDL_CreateRenderer(win, "gpu");
@@ -1121,6 +1127,22 @@ int main(int argc, char **argv)
 		else if (!gc.init(ren)) why = "this renderer can't";
 		else if (gc.self_check(why)) gpu_2d = true;
 #if VF_GPU3D_SDL
+		// (on Vulkan, chosen first, it can't: the gpu renderer on Direct3D 12 tried, as before Vulkan came first)
+		if (!gpu_2d && ren_vk && rname && !strcmp(rname, "gpu") && !getenv("VF_CPU_2D")) {
+			fprintf(stderr, "SDL's gpu renderer on Vulkan can't put pictures together exactly (%s): trying it on Direct3D 12\n", why.c_str());
+			gc.reset();
+			SDL_DestroyRenderer(ren);
+			SDL_SetHint(SDL_HINT_GPU_DRIVER, "direct3d12");
+			ren = SDL_CreateRenderer(win, "gpu");
+			SDL_ResetHint(SDL_HINT_GPU_DRIVER);
+			if (!ren) ren = SDL_CreateRenderer(win, nullptr);
+			if (!ren) return fail("Couldn't start the graphics");
+			SDL_SetRenderVSync(ren, 1);
+			rname = SDL_GetRendererName(ren);
+			why.clear();
+			if (!gc.init(ren)) why = "this renderer can't";
+			else if (gc.self_check(why)) gpu_2d = true;
+		}
 		if (!gpu_2d && rname && !strcmp(rname, "gpu") && !getenv("VF_CPU_2D")) {   // (SDL's usual one, which could)
 			fprintf(stderr, "SDL's gpu renderer can't put pictures together exactly (%s): SDL's usual renderer instead\n", why.c_str());
 			gc.reset();
@@ -1253,7 +1275,7 @@ int main(int argc, char **argv)
 				if (d > 0) fprintf(stderr, "the 3D on the GPU (%s): its test picture isn't the CPU's (%lld of %lld pixels differ, %lld drawn on one only, %lld by more than %d)\n",
 								   g3->name(), d, px, dd.cover, dd.big, model1::GPU_ROUNDING_COLOUR);
 				else fprintf(stderr, "the 3D on the GPU (%s): its test picture failed\n", g3->name());
-				// (and an AMD card's Vulkan, chosen first, failing: Direct3D 12's tried)
+				// (and Vulkan, chosen first on Windows, failing: Direct3D 12's tried)
 				const bool d3d = !strncmp(g3->name(), "direct3d12", 10), vk = vk_first && !strncmp(g3->name(), "vulkan", 6);
 				if (attempt == 0 && (d3d || vk) && !getenv("SDL_GPU_DRIVER")) {
 					m.set_gpu3d(nullptr);
@@ -1672,6 +1694,12 @@ int main(int argc, char **argv)
 				redraw_if_stopped();
 				log_state("the player's 3D renderer");
 			} });
+#ifdef _WIN32
+		p.items.push_back({ "Graphics driver",
+			"Which of Windows' graphics drivers the GPU uses. Auto starts on Vulkan, and on Direct3D 12 if Vulkan won't start or can't draw the game exactly. Pick Direct3D 12 if the game runs better on it here. Takes effect the next time the game starts.",
+			[&] { return std::string(cfg.graphics ? "Direct3D 12" : "Auto (Vulkan first)"); },
+			[&](int) { cfg.graphics = !cfg.graphics; cfg_dirty = true; } });
+#endif
 		p.items.push_back({ "Picture shape",
 			"Fit the window fills any screen shape. The other shapes add black bars to keep their shape; 4:3 is the original arcade screen. (F6)",
 			[&] { return std::string(aspect_i ? ASPECT_NAMES[aspect_i] : "Fit the window"); },
