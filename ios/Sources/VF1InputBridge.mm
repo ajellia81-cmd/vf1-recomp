@@ -111,9 +111,8 @@ void ios_input_reset()
 
 void ios_input_set_menu(bool open)
 {
-	g_menu_open = open;
-	update_touch_visibility(GCController.controllers.count != 0);
-	if (open) g_input = {};
+ ios_input_menu_transition(g_input,g_menu_open,open);
+ update_touch_visibility(GCController.controllers.count != 0);
 }
 
 void ios_input_uninstall()

@@ -18,3 +18,12 @@ void ios_input_reset();
 void ios_input_set_menu(bool open);
 void ios_input_uninstall();
 ios_input_snapshot ios_input_read();
+
+// Entering the menu releases gameplay buttons; a Menu tap must survive both
+// the transition and subsequent UI updates until the host consumes it.
+inline void ios_input_menu_transition(ios_input_snapshot &input, bool &menu_open, bool open)
+{
+ if(open && !menu_open)
+  for(auto &player:input.down)for(bool &down:player)down=false;
+ menu_open=open;
+}

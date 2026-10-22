@@ -2321,9 +2321,9 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	};
 	while (running) {
 #if defined(VF1_IOS)
-		ios_input_set_menu(menu.is_open());
 		ios = ios_input_read();
-		if (ios.menu_pressed) { SDL_Event key{}; key.type=SDL_EVENT_KEY_DOWN; key.key.scancode=SDL_SCANCODE_ESCAPE; key.key.key=SDLK_ESCAPE; key.key.down=true; SDL_PushEvent(&key); ios.menu_pressed=false; }
+		if (ios.menu_pressed) { if(menu.is_open())menu.close();else open_menu();ios.menu_pressed=false; }
+		ios_input_set_menu(menu.is_open());
 #endif
 		if (!started_at) { started_at = SDL_GetTicksNS(); log_state("the start"); }
 		bool in_texture = false;           // this pass's picture is on the GPU already (or the last one stays)

@@ -46,3 +46,10 @@ Resolution keeps the original 1x, 2x, 3x, 4x, 5x, 6x order and appends
 original Picture shape choices (Fit the window, 4:3, 16:10, 16:9, 21:9).
 The iPhone output resolves the original 4x raster to 2868 x 1320; it does
 not override or overwrite the selected aspect ratio.
+
+## Build 3: touch Menu while paused
+
+Menu taps survive repeated menu-state updates. Entering the menu releases only
+gameplay buttons; it does not erase a pending Menu tap. The host samples the tap
+before updating menu visibility and toggles the menu once per tap. The ROM-free
+touch_menu check exercises the actual bridge transition helper.
