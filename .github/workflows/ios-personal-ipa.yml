@@ -1,3 +1,4 @@
+# Build 2: all resolutions, including iPhone, honor Picture shape.
 name: Personal unsigned iOS IPA (Model 1)
 on:
   push:

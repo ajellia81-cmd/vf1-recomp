@@ -16,10 +16,10 @@ inline bool draw_game_picture(SDL_Renderer *renderer, SDL_Texture *picture, int 
 
 // Render targets and UI overlays have independent pixel/point coordinate spaces.
 // Re-establish all window state instead of inheriting a target's scale or scissor.
-inline bool prepare_game_view(SDL_Renderer *renderer, int width, int height, bool stretch = false)
+inline bool prepare_game_view(SDL_Renderer *renderer, int width, int height)
 {
 	return SDL_SetRenderTarget(renderer, nullptr)
-		&& SDL_SetRenderLogicalPresentation(renderer, width, height, stretch ? SDL_LOGICAL_PRESENTATION_STRETCH : SDL_LOGICAL_PRESENTATION_LETTERBOX)
+		&& SDL_SetRenderLogicalPresentation(renderer, width, height, SDL_LOGICAL_PRESENTATION_LETTERBOX)
 		&& SDL_SetRenderScale(renderer, 1, 1)
 		&& SDL_SetRenderViewport(renderer, nullptr)
 		&& SDL_SetRenderClipRect(renderer, nullptr);

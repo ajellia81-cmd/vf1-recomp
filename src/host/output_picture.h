@@ -26,7 +26,7 @@ public:
    && SDL_SetRenderClipRect(ren,nullptr)
    && SDL_SetRenderDrawColor(ren,0,0,0,255) && SDL_RenderClear(ren)
    && SDL_RenderTexture(ren,source,nullptr,nullptr);
-  prepare_game_view(ren,int(std::lround(384*aspect)),384,true);
+  prepare_game_view(ren,int(std::lround(384*aspect)),384);
   return ok?target:source;
  }
 };

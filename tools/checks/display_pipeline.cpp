@@ -22,16 +22,6 @@ int main(){
   assert(prepare_game_view(r,96,1320));assert(draw_game_picture(r,t,gain));
   const unsigned c=unsigned(64*gain/100);assert(pixel(r,40,40)==c*0x010101);
  }
-
- // A saved fixed shape letterboxes; only the iPhone choice fills any drawable.
- for (bool native : {false, true, false, true}) {
-  SDL_Renderer *view = r;
-  assert(prepare_game_view(view, 512, 288, native));
-  int width=0,height=0; assert(SDL_GetRenderOutputSize(view,&width,&height));
-  SDL_FRect rect{}; assert(SDL_GetRenderLogicalPresentationRect(view,&rect));
-  if(native) { assert(rect.x==0 && rect.y==0 && rect.w==width && rect.h==height); }
-  else { assert(rect.w < width || rect.h < height); }
- }
  SDL_SetRenderScale(r,4,4);SDL_Rect clip{0,0,8,8};SDL_SetRenderViewport(r,&clip);SDL_SetRenderClipRect(r,&clip);
  auto*resolved=output.resolve(t,true,2868.0f/1320);assert(resolved!=t);
  assert(SDL_SetRenderTarget(r,resolved));assert(pixel(r,2867,1319)==0x404040);
