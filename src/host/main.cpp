@@ -2238,6 +2238,29 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	};
 	static const bool no_game_thread = getenv("VF_NO_GAME_THREAD") != nullptr;
 	game_thread gt;
+#if defined(VF1_IOS)
+	// UIKit may suspend us before the next SDL_PollEvent. Save while its
+	// main-thread lifecycle event is dispatched, after any frame has finished.
+	struct background_save {
+		std::function<void()> fn;
+		bool installed=true;
+		static bool SDLCALL watch(void *context,SDL_Event *event) {
+			if (SDL_IsMainThread() && (event->type==SDL_EVENT_WILL_ENTER_BACKGROUND || event->type==SDL_EVENT_TERMINATING))
+				static_cast<background_save*>(context)->fn();
+			return true;
+		}
+		void stop(){if(installed){SDL_RemoveEventWatch(watch,this);installed=false;}}
+		~background_save(){stop();}
+	} lifecycle{[&] {
+		gt.wait(); ios_input_reset(); keep_arcade_coins(); saver.finish();
+		save_blob(nv_path,m.nvram().data(),m.nvram().size());
+		save_blob(ee_path,m.eeprom(),model1::EEPROM_SIZE); save_rank_names(true);
+		if(cfg_dirty && save_settings())cfg_dirty=false;
+		open_menu();
+	}};
+	SDL_AddEventWatch(background_save::watch,&lifecycle);
+#endif
+
 	bool carried_curtain = false;      // (a curtain from the frame run during the last present)
 	bool carried_on_gpu = false;       // (... and put together by the GPU)
 	double screen_hz_now = 0;          // (the screen's Hz, looked up each second)
@@ -2379,15 +2402,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		const bool menu_was_open = menu.is_open();
 		while (SDL_PollEvent(&e)) {
 			if (e.type == SDL_EVENT_QUIT) running = false;
-#if defined(VF1_IOS)
-			if (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
-				gt.wait(); ios_input_reset(); keep_arcade_coins(); saver.finish();
-				save_blob(nv_path,m.nvram().data(),m.nvram().size());
-				save_blob(ee_path,m.eeprom(),model1::EEPROM_SIZE); save_rank_names(true);
-				if (cfg_dirty && save_settings()) cfg_dirty=false;
-				open_menu();
-			}
-#endif
+
 			else if (e.type == SDL_EVENT_RENDER_TARGETS_RESET || e.type == SDL_EVENT_RENDER_DEVICE_RESET) {
 				// Direct3D lost what render targets held (a device reset: every texture). The GPU's
 				// parts are made again whatever is on show (their old textures can't be used), and
@@ -2871,7 +2886,12 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	g3.reset();                          // (its device goes before SDL does)
 	if (gpu_check) fprintf(stderr, "gpu check: %d pictures put together on the GPU checked, %d differ\n", gpu_checked, gpu_differ);
 	gc.release();                        // (its textures and shader go before the renderer)
-	if (quit_after >= 0 && !getenv("VF_SAVE")) { screen_glass.clear(); output.clear(); SDL_Quit(); return 0; }   // test runs leave the saves and settings alone (VF_SAVE: they save, as a player's)
+	if (quit_after >= 0 && !getenv("VF_SAVE")) {
+#if defined(VF1_IOS)
+		lifecycle.stop(); ios_input_uninstall();
+#endif
+		screen_glass.clear(); output.clear(); SDL_Quit(); return 0;
+	}   // test runs leave the saves and settings alone (VF_SAVE: they save, as a player's)
 	keep_arcade_coins();
 	saver.finish();   // (an autosave still being written, done before the last save: the same files)
 	save_blob(nv_path, m.nvram().data(), m.nvram().size());
@@ -2883,7 +2903,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		save_settings();
 	}
 #if defined(VF1_IOS)
-	ios_input_uninstall();
+	lifecycle.stop(); ios_input_uninstall();
 #endif
 	screen_glass.clear(); output.clear();
 	SDL_Quit();
