@@ -95,8 +95,8 @@ jobs:
         run: python3 ios/Scripts/package-personal-ipa.py
       - uses: actions/upload-artifact@v4
         with:
-          name: VirtuaFighter-build1-${{ github.sha }}
-          path: ios/build/personal/VirtuaFighter-build1-unsigned.ipa
+          name: VirtuaFighter-build2-${{ github.sha }}
+          path: ios/build/personal/VirtuaFighter-build2-unsigned.ipa
           if-no-files-found: error
           retention-days: 3
           compression-level: 0

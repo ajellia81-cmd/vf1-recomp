@@ -38,3 +38,11 @@ archive was used. Runtime validation results belong in VALIDATION.md.
 Fullscreen is always enabled on iOS and its desktop toggle is hidden. Windows
 Graphics driver is absent on iOS. Keyboard shortcuts for render scale update
 the mobile selector; changing antialiasing keeps the selected resolution mode.
+
+## Build 2: original choices and iPhone exception
+
+Resolution keeps the original 1x, 2x, 3x, 4x, 5x, 6x order and appends
+2868 x 1320 (iPhone). Original scales honor all original Picture shape choices
+(Fit the window, 4:3, 16:10, 16:9, 21:9). Only the iPhone option ignores
+that saved choice and fills the entire screen. Returning to an original scale
+restores the saved shape; selecting iPhone does not overwrite it.

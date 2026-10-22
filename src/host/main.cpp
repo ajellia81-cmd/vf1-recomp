@@ -1515,6 +1515,9 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	// the picture's shape: the chosen one, or the window's (between 4:3 and 32:9)
 	auto apply_aspect = [&] {
 		float a = ASPECTS[aspect_i];
+#if defined(VF1_IOS)
+		if (!cfg.ios_resolution) a = 2868.0f / 1320.0f;
+#endif
 		if (a <= 0) {
 			int w = 0, h = 0;
 			SDL_GetWindowSizeInPixels(win, &w, &h);
@@ -1527,7 +1530,11 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	auto present_shape = [&] {
 		char title[96];
 		snprintf(title, sizeof title, "Virtua Fighter  %dx  %s", cfg.scale, ASPECT_NAMES[aspect_i]);
+		#if defined(VF1_IOS)
+		prepare_game_view(ren, int(std::lround(384 * m.aspect())), 384, cfg.ios_resolution == 0);
+#else
 		SDL_SetRenderLogicalPresentation(ren, int(std::lround(384 * m.aspect())), 384, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+#endif
 		SDL_SetWindowTitle(win, title);
 	};
 	// the saved shape from the start (else the picture fills the window, stretched, until F6)
@@ -1662,6 +1669,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		gpu_verified = 0;
 		gpu_recheck = 0;
 		cfg.scale = v; cfg_dirty = true;
+		apply_aspect();
 		m.set_render_scale(v * aa_fit(v, cfg.aa));
 		m.set_edge_aa(cfg.aa == 0);
 		m.set_smooth(cfg.smooth_motion);
@@ -1692,9 +1700,9 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	auto display_page = [&] {
 		menu_page p{ "Display", "", {} };
 		#if defined(VF1_IOS)
-		p.items.push_back({ "Resolution", "1x-6x is the original integer 3D raster scale. 2868 x 1320 resolves a 4x picture to the fixed output size.",
-			[&] { return cfg.ios_resolution ? std::to_string(cfg.ios_resolution)+"x" : std::string("2868 x 1320 (4x source)"); },
-			[&](int d) { cfg.ios_resolution=wrap(cfg.ios_resolution+d,7); set_scale(cfg.ios_resolution?cfg.ios_resolution:4); } });
+		p.items.push_back({ "Resolution", "1x-6x is the original integer 3D raster scale. 2868 x 1320 (last) resolves a 4x picture and fills the screen, ignoring Picture shape.",
+			[&] { return cfg.ios_resolution ? std::to_string(cfg.ios_resolution)+"x" : std::string("2868 x 1320 (iPhone)"); },
+			[&](int d) { const int i=std::clamp((cfg.ios_resolution ? cfg.ios_resolution-1 : 6)+d,0,6); cfg.ios_resolution=i==6?0:i+1; set_scale(cfg.ios_resolution?cfg.ios_resolution:4); } });
 #else
 		p.items.push_back({ "Render scale",
 			"How sharp the 3D is. 1x is the original arcade resolution; higher is sharper but needs a faster computer. (F5)",
