@@ -10,6 +10,7 @@
 #include "scene_sync.h"
 #include "gpu_compose.h"
 #include "controls.h"
+#include "bg_saver.h"
 #include "display_color.h"
 #include "screen_filter.h"
 #include "output_picture.h"
@@ -385,36 +386,7 @@ bool save_blob(const std::string &path, const uint8_t *src, size_t n)
 // every few seconds in play: a hitch each time (a reporter: "on an SSD barely noticeable, on a HDD
 // heavy stutter even at 1x"). put() hands over a copy and returns at once; a writer thread saves
 // it, the newest copy of a file winning if two wait. finish() writes what's left and stops.
-struct bg_saver {
-	std::mutex mx;
-	std::condition_variable cv;
-	std::map<std::string, std::vector<uint8_t>> jobs;
-	bool stop = false;
-	std::thread th{ [this] { run(); } };
-	void put(const std::string &path, const void *src, size_t n) {
-		{ std::lock_guard<std::mutex> l(mx); if (stop) return; jobs[path].assign(static_cast<const uint8_t *>(src), static_cast<const uint8_t *>(src) + n); }
-		cv.notify_one();
-	}
-	void run() {
-		std::unique_lock<std::mutex> l(mx);
-		for (;;) {
-			cv.wait(l, [&] { return stop || !jobs.empty(); });
-			if (jobs.empty()) return;   // (stop, nothing left)
-			auto todo = std::move(jobs);
-			jobs.clear();
-			l.unlock();
-			for (auto &[path, bytes] : todo)
-				if (!save_blob(path, bytes.data(), bytes.size())) fprintf(stderr, "couldn't save %s\n", path.c_str());
-			l.lock();
-		}
-	}
-	void finish() {
-		{ std::lock_guard<std::mutex> l(mx); stop = true; }
-		cv.notify_one();
-		if (th.joinable()) th.join();
-	}
-	~bg_saver() { finish(); }
-};
+
 
 // The menu's choices and the controls, kept in settings.ini next to the saves ("key = value").
 struct settings
@@ -947,7 +919,10 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		fclose(f);
 		m.set_ranking_names(text);
 	}
-	bg_saver saver;   // (the autosave's writes, off the game's thread)
+	bg_saver saver{[](const std::string &path,const uint8_t *bytes,size_t n) {
+		if(save_blob(path,bytes,n))return true;
+		fprintf(stderr,"couldn't save %s\n",path.c_str());return false;
+	}};   // (the autosave's writes, off the game's thread)
 	bool rank_put = false;   // (names handed to it: the last save at quit writes them whatever, in case its write failed)
 	auto save_rank_names = [&](bool now) {
 		if (m.ranking_names_version() == rank_saved && !(now && rank_put)) return;
@@ -2257,7 +2232,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		void stop(){if(installed){SDL_RemoveEventWatch(watch,this);installed=false;}}
 		~background_save(){stop();}
 	} lifecycle{[&] {
-		gt.wait(); ios_input_reset(); keep_arcade_coins(); saver.finish();
+		gt.wait(); ios_input_reset(); keep_arcade_coins(); saver.flush();
 		save_blob(nv_path,m.nvram().data(),m.nvram().size());
 		save_blob(ee_path,m.eeprom(),model1::EEPROM_SIZE); save_rank_names(true);
 		if(cfg_dirty && save_settings())cfg_dirty=false;

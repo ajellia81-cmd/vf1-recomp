@@ -55,6 +55,8 @@ jobs:
           xcrun clang++ -std=c++20 -O2 -Werror=return-type -I"$(brew --prefix sdl3)/include" tools/checks/controls_config.cpp \
             -L"$(brew --prefix sdl3)/lib" -lSDL3 -o ios/build/controls-config
           ios/build/controls-config
+          xcrun clang++ -std=c++20 -O2 -Werror=return-type tools/checks/autosave.cpp -o ios/build/autosave-check
+          ios/build/autosave-check
           xcrun clang++ -std=c++20 -O2 -Werror=return-type -Ithird_party/glm -Isrc/core/shim_include \
             tools/checks/rom_import.cpp src/host/romset.cpp -lz -o ios/build/rom-import
           ios/build/rom-import
