@@ -1,4 +1,4 @@
-name: Personal unsigned iOS IPA
+name: Personal unsigned iOS IPA (Model 1)
 on:
   push:
     branches: [ios-port]
