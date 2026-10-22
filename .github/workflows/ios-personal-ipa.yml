@@ -1,0 +1,100 @@
+name: Personal unsigned iOS IPA
+on:
+  push:
+    branches: [ios-port]
+    paths: ['.github/workflows/ios-personal-ipa.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: personal-ipa-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  ios:
+    if: github.repository == 'ajellia81-cmd/vf1-recomp'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install project generator
+        run: brew install xcodegen sdl3
+      - name: Identify Apple toolchain
+        id: toolchain
+        run: echo "key=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: dependencies
+        with:
+          path: |
+            ios/Dependencies/*.xcframework
+            ios/build/licenses
+          key: ios-static-${{ runner.os }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('ios/Dependencies/versions.env', 'ios/Scripts/prepare-dependencies.sh') }}
+      - name: Prepare redistributable libraries only
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        run: sh ios/Scripts/prepare-dependencies.sh
+      - uses: actions/cache/save@v4
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ios/Dependencies/*.xcframework
+            ios/build/licenses
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
+      - name: Prepare host-generated opcode tables (no game data)
+        run: sh ios/Scripts/prepare-sources.sh
+      - name: Test Model 1 Metal with synthetic polygons
+        run: |
+          xcrun clang++ -std=c++20 -O2 -Werror=return-type -fobjc-arc tools/checks/metal_grid.mm src/gpu/gpu3d_metal.mm \
+            -framework Metal -framework Foundation -framework QuartzCore -o ios/build/metal-grid
+          ios/build/metal-grid
+      - name: Test display and controls without game data
+        run: |
+          xcrun clang++ -std=c++20 -O2 -Werror=return-type -I"$(brew --prefix sdl3)/include" -Ithird_party/glm -Isrc/core/shim_include \
+            tools/checks/display_pipeline.cpp -L"$(brew --prefix sdl3)/lib" -lSDL3 -o ios/build/display-pipeline
+          ios/build/display-pipeline
+          xcrun clang++ -std=c++20 -O2 -Werror=return-type -I"$(brew --prefix sdl3)/include" tools/checks/controls_config.cpp \
+            -L"$(brew --prefix sdl3)/lib" -lSDL3 -o ios/build/controls-config
+          ios/build/controls-config
+          xcrun clang++ -std=c++20 -O2 -Werror=return-type -Ithird_party/glm -Isrc/core/shim_include \
+            tools/checks/rom_import.cpp src/host/romset.cpp -lz -o ios/build/rom-import
+          ios/build/rom-import
+      - name: Generate and verify interpreter-only project
+        run: |
+          sh ios/Scripts/preflight.sh
+          python3 ios/Scripts/prepare-app-icon.py
+          xcodegen generate --spec ios/project.yml
+          python3 ios/Scripts/verify-project.py
+      - name: Compile unsigned iPhone app
+        run: |
+          xcodebuild -project ios/VF1Recomp.xcodeproj -scheme VF1Recomp \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath ios/build/device CODE_SIGNING_ALLOWED=NO build > ios/build/device.log 2>&1 || {
+              grep -n -m 40 'error:' ios/build/device.log || true
+              tail -80 ios/build/device.log; exit 1;
+            }
+      - name: Compile unsigned simulator app
+        run: |
+          xcodebuild -project ios/VF1Recomp.xcodeproj -scheme VF1Recomp \
+            -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ios/build/simulator CODE_SIGNING_ALLOWED=NO build > ios/build/simulator.log 2>&1 || {
+              grep -n -m 40 'error:' ios/build/simulator.log || true
+              tail -80 ios/build/simulator.log; exit 1;
+            }
+      - name: Test asynchronous document import without game data
+        run: |
+          simulator=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for devices in json.load(sys.stdin)["devices"].values() for d in devices if d["isAvailable"] and d["name"].startswith("iPhone")))')
+          xcodebuild -project ios/VF1Recomp.xcodeproj -scheme ROMImportChecks \
+            -destination "platform=iOS Simulator,id=$simulator" \
+            -derivedDataPath ios/build/import-tests CODE_SIGNING_ALLOWED=NO test > ios/build/import-tests.log 2>&1 || {
+              tail -100 ios/build/import-tests.log; exit 1;
+            }
+          grep -E 'Test Case|Executed|TEST SUCCEEDED' ios/build/import-tests.log
+      - name: Package personal unsigned IPA without ROMs
+        run: python3 ios/Scripts/package-personal-ipa.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VirtuaFighter-build1-${{ github.sha }}
+          path: ios/build/personal/VirtuaFighter-build1-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
