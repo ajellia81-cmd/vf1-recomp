@@ -211,9 +211,10 @@ public:
 			rows += uint32_t(polys[i].rows);
 		}
 		auto put = [&](id<MTLBuffer> __strong &b, const void *src, size_t n) {
+			const size_t data_bytes = n;
 			n = std::max<size_t>(n, 16);
 			if (!b || b.length < n) b = [m_dev newBufferWithLength:n * 3 / 2 options:MTLResourceStorageModeShared];
-			if (src) memcpy(b.contents, src, n);
+			if (src && data_bytes) memcpy(b.contents, src, data_bytes);
 			return b != nil;
 		};
 		if (!put(m_pbuf, polys, count * sizeof(gpu3d_poly)) || !put(m_sbuf, nullptr, (nspans + rowspans) * sizeof(gpu3d_span))
