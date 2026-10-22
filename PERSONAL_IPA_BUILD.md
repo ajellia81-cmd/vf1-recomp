@@ -26,3 +26,19 @@ V60 execution is interpreter-only. No ROM data, extracted game data or generated
 game program was downloaded, used or included. The player imports their own
 complete MAME vf.zip including its TGP program, on-device. No release was published,
 no Apple signing secrets were used, and no user computer was involved.
+
+## Build 2: original resolution order and selectable aspect
+
+- Source: 6289a6d6d3f506bd849afca5f25d1c77d87f0bbd
+- Successful Apple build: https://github.com/ajellia81-cmd/vf1-recomp/actions/runs/39788420982
+- IPA: VirtuaFighter-build2-unsigned.ipa (7435427 bytes)
+- SHA-256: f9f0dd3339e2299ca222ea5eac3c43b129522a7ab317146593791ee1747b438c
+
+Resolution choices are 1x, 2x, 3x, 4x, 5x, 6x, then 2868 x 1320 (iPhone).
+Every choice, including iPhone output, follows Picture shape: Fit the window,
+4:3, 16:10, 16:9 or 21:9. VF2's former hidden Picture shape is restored and
+no longer reset at launch. All saved resolution keys retain their old meaning.
+Apple compilation, Metal composition/filter/brightness checks, controls and two
+simulator import tests passed. Downloaded ZIP, build/source metadata and SHA-256
+match the runner. Physical-device gameplay has not been tested by CI.
+Interpreter-only execution, no ROM inclusion, personal unsigned use only.
