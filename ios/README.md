@@ -41,3 +41,6 @@ outputs are ignored. Build output: VirtuaFighter-build1-unsigned.ipa.
 Local Linux C++ syntax and missing-archive checks do not establish iOS compilation,
 valid import, game graphics/audio/cheats/input, achieved frame rate or device Quit.
 Apple SDK and device validation must be recorded separately after they occur.
+
+Successful build and verification: [VALIDATION.md](VALIDATION.md).
+All menu categories: [OPTIONS_AUDIT.md](OPTIONS_AUDIT.md).
