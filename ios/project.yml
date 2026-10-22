@@ -90,6 +90,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ajellia81.vf1recomp.importchecks
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../third_party/glm"
         GENERATE_INFOPLIST_FILE: YES
         CLANG_ENABLE_OBJC_ARC: YES
         CLANG_CXX_LANGUAGE_STANDARD: c++20

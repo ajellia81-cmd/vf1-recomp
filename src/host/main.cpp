@@ -906,7 +906,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	if (getenv("SteamDeck")) { cfg.fullscreen = true; cfg.aspect = 2; }
 	cfg.load(settings_path);
 #if defined(VF1_IOS)
-	cfg.fullscreen = true; cfg.aspect = 0;
+	cfg.fullscreen = true;
 	cfg.scale = cfg.ios_resolution ? cfg.ios_resolution : 4;
 #endif
 	if (arg_scale) cfg.scale = std::clamp(arg_scale, 1, 6);
@@ -1695,7 +1695,12 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		make_texture(); present_shape(); redraw_if_stopped();
 		log_state("the player's scale or antialiasing");
 	};
-	auto player_scale_to = [&](int v) { set_scale(v); };
+	auto player_scale_to = [&](int v) {
+#if defined(VF1_IOS)
+		cfg.ios_resolution=v;
+#endif
+		set_scale(v);
+	};
 	auto set_shape = [&](int v) {
 		aspect_i = cfg.aspect = v; cfg_dirty = true;
 		sync.reset();
@@ -1714,7 +1719,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		#if defined(VF1_IOS)
 		p.items.push_back({ "Resolution", "1x-6x is the original integer 3D raster scale. 2868 x 1320 resolves a 4x picture to the fixed output size.",
 			[&] { return cfg.ios_resolution ? std::to_string(cfg.ios_resolution)+"x" : std::string("2868 x 1320 (4x source)"); },
-			[&](int d) { cfg.ios_resolution=wrap(cfg.ios_resolution+d,7); player_scale_to(cfg.ios_resolution?cfg.ios_resolution:4); } });
+			[&](int d) { cfg.ios_resolution=wrap(cfg.ios_resolution+d,7); set_scale(cfg.ios_resolution?cfg.ios_resolution:4); } });
 #else
 		p.items.push_back({ "Render scale",
 			"How sharp the 3D is. 1x is the original arcade resolution; higher is sharper but needs a faster computer. (F5)",
@@ -2277,7 +2282,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 #endif
 		)) {
 		case hotkey::menu: open_menu(); break;
-		case hotkey::scale: player_scale_to(cfg.scale % 4 + 1); break;
+		case hotkey::scale: player_scale_to(cfg.scale % 6 + 1); break;
 		case hotkey::aspect: set_shape((aspect_i + 1) % N_ASPECTS); break;
 		case hotkey::none: break;
 		}
