@@ -50,7 +50,7 @@ jobs:
       - name: Test display and controls without game data
         run: |
           xcrun clang++ -std=c++20 -O2 -Werror=return-type -I"$(brew --prefix sdl3)/include" -Ithird_party/glm -Isrc/core/shim_include \
-            tools/checks/display_pipeline.cpp -L"$(brew --prefix sdl3)/lib" -lSDL3 -o ios/build/display-pipeline
+            tools/checks/display_pipeline.cpp src/machine/model1_compose.cpp -L"$(brew --prefix sdl3)/lib" -lSDL3 -o ios/build/display-pipeline
           ios/build/display-pipeline
           xcrun clang++ -std=c++20 -O2 -Werror=return-type -I"$(brew --prefix sdl3)/include" tools/checks/controls_config.cpp \
             -L"$(brew --prefix sdl3)/lib" -lSDL3 -o ios/build/controls-config
