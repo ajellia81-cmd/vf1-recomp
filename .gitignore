@@ -11,3 +11,9 @@ refs/
 /tools/site/strip/node_modules/
 /tools/site/strip/package-lock.json
 .DS_Store
+
+# Generated Apple SDK/project products
+ios/build/
+ios/Dependencies/*.xcframework/
+ios/Generated/
+ios/*.xcodeproj/
