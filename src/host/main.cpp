@@ -10,6 +10,16 @@
 #include "scene_sync.h"
 #include "gpu_compose.h"
 #include "controls.h"
+#include "display_color.h"
+#include "screen_filter.h"
+#include "output_picture.h"
+#if defined(VF1_IOS)
+#include "ios_platform.h"
+#include "ios_input.h"
+#if !defined(VF1_DISABLE_JIT) || defined(VF_NATIVE)
+#error "iOS must remain interpreter-only"
+#endif
+#endif
 #include "../machine/parallel.h"
 #include "../rt/rec_rt.h"
 #ifdef VF_NATIVE
@@ -23,10 +33,11 @@
 #else
 #include <unistd.h>
 #endif
-#ifdef _WIN32
+#if defined(_WIN32) || defined(VF1_IOS)
 #include <SDL3/SDL_main.h>   // WinMain, and argv as UTF-8
 #endif
 #include <string>
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -191,7 +202,11 @@ void load_script(const char *path)
 }
 bool g_left_test_menu = false;       // set when it closes (the PC build then restarts past the boot screen)
 
-hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const player_controls ctl[2])
+hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const player_controls ctl[2]
+#if defined(VF1_IOS)
+, const ios_input_snapshot *ios
+#endif
+)
 {
 	static const uint8_t BITS[C_COUNT] = {
 		PL_UP, PL_DOWN, PL_LEFT, PL_RIGHT, PL_GUARD, PL_PUNCH, PL_KICK,
@@ -223,6 +238,18 @@ hotkey read_inputs(model1 &m, SDL_Gamepad *pads[2], pad_state ps[2], const playe
 		if (kcoin && !key_coin_was[p] && !g_pc_mode) st.coin_frames = 6;
 		key_coin_was[p] = kcoin;
 
+#if defined(VF1_IOS)
+		if (ios) {
+			for (int a=0;a<C_START;++a) if (ios->down[p][a]) in[1+p] |= BITS[a];
+			static bool start_was[2], coin_was[2];
+			if (ios->down[p][C_START] && !start_was[p]) press_start();
+			start_was[p] = ios->down[p][C_START];
+			if (start_was[p]) in[0] |= p ? IN0_START2 : IN0_START1;
+			if (ios->down[p][C_COIN] && !coin_was[p] && !g_pc_mode) st.coin_frames=6;
+			coin_was[p] = ios->down[p][C_COIN];
+			if (p==0 && ios->menu_pressed) hk=hotkey::menu;
+		}
+#endif
 		const uint8_t coin_bit = p ? IN0_COIN2 : IN0_COIN1, start_bit = p ? IN0_START2 : IN0_START1;
 		if (SDL_Gamepad *g = pads[p]) {
 			uint8_t &b = in[1 + p];
@@ -393,6 +420,8 @@ struct bg_saver {
 struct settings
 {
 	int scale = 2, aspect = 0, volume = 100, music = 100, effects = 100, aa = 1, filter = 0, ring = 0;
+	int brightness = 100, ios_resolution = 0;
+	bool smooth_motion = true, pads_swapped = false;
 	int renderer3d = 2;     // the 3D's renderer: 0 the CPU, 1 the GPU, 2 Auto (whichever is quicker here)
 	int graphics = 0;       // Windows: the GPU's driver, from the next start: 0 Auto (Vulkan first, Direct3D 12 if it won't start), 1 Direct3D 12
 	int akira_slot = 0;     // Cheats: who plays in Akira's place (model1::UNUSED_CHARACTERS; 0 Akira)
@@ -427,6 +456,10 @@ struct settings
 		};
 		auto flag = [&](const char *k, bool &v) { int i = v; num(k, i, 0, 1); v = i; };
 		num("scale", scale, 1, 6);
+		num("brightness", brightness, 50, 200);
+		num("ios_resolution", ios_resolution, 0, 6);
+		flag("smooth_motion", smooth_motion);
+		flag("pads_swapped", pads_swapped);
 		num("picture_shape", aspect, 0, 4);
 		num("volume", volume, 0, 100);
 		num("antialiasing", aa, 0, 3);   // 1 off, 0 Low (the 3D's edges smoothed), 2 and 3 drawn larger
@@ -499,6 +532,8 @@ struct settings
 				int(fullscreen), int(timings), volume, int(arcade), int(smooth_bg), music, effects, aa, int(show_fps), filter, ring);
 		if (arcade_coin >= 0) fprintf(f, "arcade_coins = %d\n", arcade_coin);
 		fprintf(f, "renderer_3d = %d\n", renderer3d);
+		fprintf(f, "ios_resolution = %d\n", ios_resolution);
+		fprintf(f, "brightness = %d\nsmooth_motion = %d\npads_swapped = %d\n", brightness, int(smooth_motion), int(pads_swapped));
 		if (graphics) fprintf(f, "graphics = %d\n", graphics);
 		if (akira_slot) fprintf(f, "akira_slot = %d\n", akira_slot);
 		for (int p = 0; p < 2; p++) {
@@ -561,6 +596,19 @@ static bool copy_whole(const std::filesystem::path &from, const std::filesystem:
 // the next start looks), not into the data folder.
 bool first_launch(const std::string &data, const std::string &keep, const std::string &folder, model1::regions &out)
 {
+#if defined(VF1_IOS)
+	const auto archive = std::filesystem::path(data) / "roms/vf.zip";
+	if (std::filesystem::is_regular_file(archive)) {
+		auto loaded = romset::load({archive.string()});
+		if (loaded.ok) { out = std::move(loaded.regions); return true; }
+	}
+	const std::string selected = ios_import_rom();
+	if (selected.empty()) return false;
+	auto loaded = romset::load({selected});
+	if (!loaded.ok) return false;
+	out = std::move(loaded.regions); return true;
+#else
+
 	namespace fs = std::filesystem;
 	const fs::path own = fs::path(data) / "roms";
 	const fs::path roms = folder.empty() ? own : fs::path(folder);       // (where a picked set is copied)
@@ -661,6 +709,7 @@ bool first_launch(const std::string &data, const std::string &keep, const std::s
 		if (r.ok) { keep_copy(); out = std::move(r.regions); return true; }
 		note = r.error + "\n\nChoose MAME's \"vf\" set (vf.zip).";
 	}
+#endif
 }
 
 // A folder as the player writes it: "~" (or "~/...") is their home folder; quotes around it are
@@ -736,7 +785,7 @@ std::string find_assets()
 
 } // namespace
 
-int main(int argc, char **argv)
+static int run_game(int argc, char **argv, bool &quit_application)
 {
 #ifdef __APPLE__
 	// the game, its drawing and its sound on the performance cores: without it an M-series Mac can put
@@ -759,6 +808,10 @@ int main(int argc, char **argv)
 	// the command line wins over settings.ini, which is found in the data directory
 	int arg_scale = 0, arg_aspect = -1, arg_full = -1;
 	bool interp = false, arg_arcade = false;
+#if defined(VF1_IOS)
+	interp = true;
+	dir = ios_data_directory();
+#endif
 	std::string arg_roms;   // --roms <folder>: where the player's vf.zip is (over VF_ROMS and settings.ini's roms_folder)
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
@@ -803,6 +856,9 @@ int main(int argc, char **argv)
 			const std::string home = program_folder();
 			portable = portable_marker(home);
 			char *pref = portable ? nullptr : SDL_GetPrefPath(nullptr, "Virtua Fighter Recomp");
+#if defined(VF1_IOS)
+			SDL_free(pref); pref = SDL_strdup(ios_data_directory().c_str());
+#endif
 			std::string keep = pref ? pref : "";                                 // (the zips kept across updates)
 			if (getenv("VF_DATA")) keep.clear();                                 // (testing: the player's own left alone)
 			if (const char *k = getenv("VF_KEEP"); k && !portable) keep = k;     // testing: another user's data folder
@@ -849,6 +905,10 @@ int main(int argc, char **argv)
 	cfg.scale = 2;
 	if (getenv("SteamDeck")) { cfg.fullscreen = true; cfg.aspect = 2; }
 	cfg.load(settings_path);
+#if defined(VF1_IOS)
+	cfg.fullscreen = true; cfg.aspect = 0;
+	cfg.scale = cfg.ios_resolution ? cfg.ios_resolution : 4;
+#endif
 	if (arg_scale) cfg.scale = std::clamp(arg_scale, 1, 6);
 	if (arg_aspect >= 0) cfg.aspect = arg_aspect;
 	if (arg_full >= 0) cfg.fullscreen = arg_full;
@@ -869,7 +929,7 @@ int main(int argc, char **argv)
 	auto aa_fit = [](int scale, int aa) { return std::max(1, std::min(aa, 8 / scale)); };
 	m.set_render_scale(scale * aa_fit(scale, cfg.aa));   // antialiasing: drawn larger, averaged down
 	m.set_edge_aa(cfg.aa == 0);                           // or Low: the edges smoothed
-	m.set_smooth(true);   // always: a picture for each refresh of the screen, between the arcade's 57.5 frames a second
+	m.set_smooth(cfg.smooth_motion);   // always: a picture for each refresh of the screen, between the arcade's 57.5 frames a second
 	m.set_sky_filter(cfg.smooth_bg);
 	m.set_aspect(ASPECTS[aspect_i] > 0 ? ASPECTS[aspect_i] : 16.0f / 9.0f);
 	// the real I/O board's 93C46 and the stand-in's image are laid out differently
@@ -1035,6 +1095,10 @@ int main(int argc, char **argv)
 									   (fullscreen ? SDL_WINDOW_FULLSCREEN : 0) |
 									   (getenv("VF_HIDDEN") ? SDL_WINDOW_HIDDEN : 0));   // testing: never on screen
 	if (!win) return fail("Couldn't open the window");
+#if defined(VF1_IOS)
+	SDL_ShowWindow(win); SDL_SyncWindow(win);
+	ios_input_install(win);
+#endif
 	SDL_HideCursor();
 	// Started from a terminal, the window can open behind it or without the keyboard (the keys go
 	// to the terminal): take it, and again once the first picture is up if it still isn't ours.
@@ -1497,71 +1561,9 @@ int main(int argc, char **argv)
 	// pixels (made again when the picture's size changes). Scanlines darkens between the arcade's 384
 	// lines; CRT adds an aperture grille (red, green and blue stripes) and slightly darker corners.
 	const char *FILTER_NAMES[] = { "Off", "Scanlines", "CRT" };
-	SDL_Texture *glass = nullptr;
-	int glass_w = 0, glass_h = 0, glass_kind = 0;
-	auto draw_filter = [&] {
-		SDL_FRect r;
-		if (!cfg.filter || !SDL_GetRenderLogicalPresentationRect(ren, &r)) return;
-		const int w = int(std::lround(r.w)), h = int(std::lround(r.h));
-		if (w < 1 || h < 1) return;
-		if (!glass || w != glass_w || h != glass_h || cfg.filter != glass_kind) {
-			if (glass) SDL_DestroyTexture(glass);
-			glass = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
-			if (!glass) return;
-			glass_w = w; glass_h = h; glass_kind = cfg.filter;
-			const bool crt = cfg.filter == 2;
-			// the lines want a couple of pixels each to show: they fade in from 1.5 to 3 per line
-			const float per_line = h / 384.0f;
-			const float depth = (crt ? 0.45f : 0.6f) * std::clamp((per_line - 1.5f) / 1.5f, 0.0f, 1.0f);
-			// The lines are a whole number of screen pixels apart: the picture's lines to the nearest,
-			// so every line looks the same. Sampled at a fraction of a line apart (the Deck's 800-pixel
-			// screen: 2.08 pixels a line), the pattern beat into uneven bands every dozen lines. At a
-			// whole number of pixels a line this is the picture's own lines, as before; two pixels a
-			// line: a bright row and a dark one.
-			const int period = std::max(1, int(std::lround(per_line)));
-			std::vector<float> row(h);
-			for (int y = 0; y < h; y++) {
-				const float f = period == 2 ? float(y % 2) * 0.5f : (float(y % period) + 0.5f) / float(period);
-				row[y] = 1 - depth * (1 - std::sin(f * 3.14159265f));   // 1 mid-line, darker at its edges
-			}
-			auto glass_at = [&](int x, int y, float rgb[3]) {
-				rgb[0] = rgb[1] = rgb[2] = row[y];
-				if (!crt) return;
-				for (int c = 0; c < 3; c++) if (c != x % 3) rgb[c] *= 0.78f;   // the grille: one colour per pixel column
-				const float dx = (x + 0.5f) / w * 2 - 1, dy = (y + 0.5f) / h * 2 - 1;
-				const float d = std::min(1.0f, (dx * dx + dy * dy) / 2);
-				for (int c = 0; c < 3; c++) rgb[c] *= 1 - 0.22f * d * d;      // the corners
-			};
-			// Multiplying only darkens: drawn as twice the product instead (dst * glass * 2), the glass
-			// also brightens the middle of each line, so the picture keeps about its brightness.
-			const SDL_BlendMode times2 = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_DST_COLOR, SDL_BLENDFACTOR_SRC_COLOR,
-				SDL_BLENDOPERATION_ADD, SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
-			const bool doubled = SDL_SetTextureBlendMode(glass, times2);
-			if (!doubled) SDL_SetTextureBlendMode(glass, SDL_BLENDMODE_MOD);   // a renderer without it: darker
-			float gain = 1;
-			if (doubled) {
-				double sum = 0; int n = 0;
-				for (int y = 0; y < h; y += 3)
-					for (int x = 0; x < w; x += 7) { float v[3]; glass_at(x, y, v); sum += v[0] + v[1] + v[2]; n += 3; }
-				gain = std::min(1.4f, float(n / sum));
-			}
-			const float scale = 255 * gain / (doubled ? 2 : 1);
-			std::vector<uint32_t> px(size_t(w) * h);
-			parallel_rows(h, [&](int y0, int y1) {   // on every core: a 4K window's is ~20 ms on one
-				for (int y = y0; y < y1; y++)
-					for (int x = 0; x < w; x++) {
-						float v[3];
-						glass_at(x, y, v);
-						uint32_t c[3];
-						for (int i = 0; i < 3; i++) c[i] = uint32_t(std::min(255.0f, v[i] * scale + 0.5f));
-						px[size_t(y) * w + x] = 0xff000000u | c[0] << 16 | c[1] << 8 | c[2];
-					}
-			}, 4);
-			SDL_UpdateTexture(glass, nullptr, px.data(), w * 4);
-			SDL_SetTextureScaleMode(glass, SDL_SCALEMODE_NEAREST);
-		}
-		SDL_RenderTexture(ren, glass, nullptr, nullptr);   // over the picture (the logical area), under the menu
-	};
+	screen_filter screen_glass(ren);
+	output_picture output(ren);
+	auto draw_filter = [&] { screen_glass.draw(cfg.filter); };
 
 	SDL_AudioSpec spec{ SDL_AUDIO_S16, 2, m1audio::OUT_RATE };
 	SDL_AudioStream *audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
@@ -1574,7 +1576,7 @@ int main(int argc, char **argv)
 	constexpr int QUEUED = 3;            // frames of sound kept queued: the slack for a slow or late screen
 
 	SDL_Gamepad *pads[2] = { nullptr, nullptr };
-	bool pads_swapped = false;           // two pads that look alike (same GUID): swapped by hand
+	bool &pads_swapped = cfg.pads_swapped;           // two pads that look alike (same GUID): swapped by hand
 	auto guid_of = [](SDL_JoystickID id) {
 		char g[64];
 		SDL_GUIDToString(SDL_GetGamepadGUIDForID(id), g, sizeof g);
@@ -1666,6 +1668,7 @@ int main(int argc, char **argv)
 		m.set_random_fighter(cfg.random_fighter > 0, cfg.random_fighter > 0, cfg.random_cpu);   // (first: see above)
 		m.set_akira_slot(akira_now());
 		load_secret_icon(m, akira_now(), icon_dirs());
+		prepare_game_view(ren, int(std::lround(384*m.aspect())),384);
 		SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
 		SDL_RenderClear(ren);
 		SDL_RenderPresent(ren);
@@ -1686,7 +1689,7 @@ int main(int argc, char **argv)
 		cfg.scale = v; cfg_dirty = true;
 		m.set_render_scale(v * aa_fit(v, cfg.aa));
 		m.set_edge_aa(cfg.aa == 0);
-		m.set_smooth(true);
+		m.set_smooth(cfg.smooth_motion);
 		sync.reset();                          // a new picture size: show the next frame as it is
 		auto_measure("a new scale or antialiasing");
 		make_texture(); present_shape(); redraw_if_stopped();
@@ -1708,10 +1711,16 @@ int main(int argc, char **argv)
 	auto back_item = [&] { return menu_item{ "Back", "Back to the previous page.", {}, {}, [&] { menu.pop(); } }; };
 	auto display_page = [&] {
 		menu_page p{ "Display", "", {} };
+		#if defined(VF1_IOS)
+		p.items.push_back({ "Resolution", "1x-6x is the original integer 3D raster scale. 2868 x 1320 resolves a 4x picture to the fixed output size.",
+			[&] { return cfg.ios_resolution ? std::to_string(cfg.ios_resolution)+"x" : std::string("2868 x 1320 (4x source)"); },
+			[&](int d) { cfg.ios_resolution=wrap(cfg.ios_resolution+d,7); player_scale_to(cfg.ios_resolution?cfg.ios_resolution:4); } });
+#else
 		p.items.push_back({ "Render scale",
 			"How sharp the 3D is. 1x is the original arcade resolution; higher is sharper but needs a faster computer. (F5)",
 			[&] { return std::to_string(cfg.scale) + "x"; },
 			[&](int d) { player_scale_to(std::clamp(cfg.scale + d, 1, 6)); } });
+#endif
 		p.items.push_back({ "Antialiasing",
 			"Smooths jagged edges on the 3D. Low smooths the edges for little cost; 2x and 3x draw the 3D larger and look cleanest, but take a lot more power (lower the render scale if the game slows down).",
 			[&] { return cfg.aa == 0 ? std::string("Low") : aa_now() == 1 ? std::string(cfg.aa > 1 ? "Off (too large here)" : "Off") : std::to_string(aa_now()) + "x"; },
@@ -1751,12 +1760,20 @@ int main(int argc, char **argv)
 			"Scanlines adds the dark lines between the arcade monitor's rows. CRT adds those, the monitor's red, green and blue stripes, and slightly darker corners. The lines need a large window or fullscreen to show.",
 			[&] { return std::string(FILTER_NAMES[cfg.filter]); },
 			[&](int d) { cfg.filter = wrap(cfg.filter + d, 3); cfg_dirty = true; } });
-		p.items.push_back({ "Show FPS", "Shows the frame rate in the top right corner.",
+		p.items.push_back({ "Brightness", "100% preserves the game picture; higher values brighten it.",
+			[&] { return std::to_string(cfg.brightness) + "%"; },
+			[&](int d) { cfg.brightness = std::clamp(cfg.brightness + 10*d,50,200); cfg_dirty = true; } });
+		p.items.push_back({ "Smooth motion", "Interpolated pictures at the display refresh rate, including 120 Hz when available.",
+			[&] { return on_off(cfg.smooth_motion); },
+			[&](int) { cfg.smooth_motion = !cfg.smooth_motion; cfg_dirty = true; m.set_smooth(cfg.smooth_motion); redraw_if_stopped(); } });
+		p.items.push_back({ "Show FPS", "Shows the frame rate inside the screen safe area.",
 			[&] { return on_off(cfg.show_fps); },
 			[&](int) { cfg.show_fps = !cfg.show_fps; cfg_dirty = true; if (!cfg.show_fps) menu.set_fps(""); } });
+#if !defined(VF1_IOS)
 		p.items.push_back({ "Fullscreen", "Play fullscreen or in a window. (F11, F or Alt+Enter)",
 			[&] { return on_off(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN); },
 			[&](int) { set_fullscreen(!(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); } });
+#endif
 		p.items.push_back(back_item());
 		return p;
 	};
@@ -2123,7 +2140,7 @@ int main(int argc, char **argv)
 								 auto choice = [&](int p) { return pads[p] ? guid_of(SDL_GetGamepadID(pads[p])) : std::string("none"); };
 								 std::string a = choice(0), b = choice(1);
 								 if (a == b) {          // alike (same model, Steam Input): swap who holds which
-									 pads_swapped = !pads_swapped;
+									 pads_swapped = !pads_swapped; cfg_dirty = true;
 									 std::swap(pads[0], pads[1]);
 									 return;
 								 }
@@ -2147,7 +2164,7 @@ int main(int argc, char **argv)
 		p.items.push_back({ "Controls", "Each player's controller, keys and buttons.", {}, {}, [&] { menu.push(controls_page()); } });
 		p.items.push_back({ "Cheats", "Secret characters, random fighters, Kage's mask and fight switches. Some restart the game.", {}, {},
 							[&] { menu.push(cheats_page()); } });
-		p.items.push_back({ "Quit", "Saves and closes the game.", {}, {}, [&] { running = false; } });
+		p.items.push_back({ "Quit", "Saves and closes the game.", {}, {}, [&] { quit_application = true; running = false; } });
 		return p;
 	};
 	auto open_menu = [&] { if (menu.ready() && !menu.is_open()) menu.open(main_page()); };
@@ -2227,8 +2244,15 @@ int main(int argc, char **argv)
 	bool vsync_now = true;             // (vsync forced off, or not taken: present returns at once, so not every pass)
 	// A game frame's inputs (false: a hotkey opened the menu, no frame runs) and what follows one: the
 	// scene changes' hold, its sound
+#if defined(VF1_IOS)
+	ios_input_snapshot ios;
+#endif
 	auto frame_inputs = [&]() -> bool {
-		switch (read_inputs(m, pads, pstate, cfg.ctl)) {
+		switch (read_inputs(m, pads, pstate, cfg.ctl
+#if defined(VF1_IOS)
+		,&ios
+#endif
+		)) {
 		case hotkey::menu: open_menu(); break;
 		case hotkey::scale: player_scale_to(cfg.scale % 4 + 1); break;
 		case hotkey::aspect: set_shape((aspect_i + 1) % N_ASPECTS); break;
@@ -2293,6 +2317,11 @@ int main(int argc, char **argv)
 		return true;
 	};
 	while (running) {
+#if defined(VF1_IOS)
+		ios_input_set_menu(menu.is_open());
+		ios = ios_input_read();
+		if (ios.menu_pressed) { SDL_Event key{}; key.type=SDL_EVENT_KEY_DOWN; key.key.scancode=SDL_SCANCODE_ESCAPE; key.key.key=SDLK_ESCAPE; key.key.down=true; SDL_PushEvent(&key); ios.menu_pressed=false; }
+#endif
 		if (!started_at) { started_at = SDL_GetTicksNS(); log_state("the start"); }
 		bool in_texture = false;           // this pass's picture is on the GPU already (or the last one stays)
 		curtain = carried_curtain;
@@ -2350,6 +2379,15 @@ int main(int argc, char **argv)
 		const bool menu_was_open = menu.is_open();
 		while (SDL_PollEvent(&e)) {
 			if (e.type == SDL_EVENT_QUIT) running = false;
+#if defined(VF1_IOS)
+			if (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
+				gt.wait(); ios_input_reset(); keep_arcade_coins(); saver.finish();
+				save_blob(nv_path,m.nvram().data(),m.nvram().size());
+				save_blob(ee_path,m.eeprom(),model1::EEPROM_SIZE); save_rank_names(true);
+				if (cfg_dirty && save_settings()) cfg_dirty=false;
+				open_menu();
+			}
+#endif
 			else if (e.type == SDL_EVENT_RENDER_TARGETS_RESET || e.type == SDL_EVENT_RENDER_DEVICE_RESET) {
 				// Direct3D lost what render targets held (a device reset: every texture). The GPU's
 				// parts are made again whatever is on show (their old textures can't be used), and
@@ -2363,7 +2401,7 @@ int main(int argc, char **argv)
 						m.set_gpu3d_target(false);
 					}
 					make_texture();
-					if (glass) { SDL_DestroyTexture(glass); glass = nullptr; }
+					screen_glass.clear(); output.clear();
 				}
 				upload();
 			}
@@ -2691,7 +2729,13 @@ int main(int argc, char **argv)
 		// (Random fighter played alone: the select it makes for itself (a moment) isn't shown: who you
 		// got is a surprise when the fight comes in)
 		if (!m.random_select_hidden())
-			SDL_RenderTexture(ren, show_target ? (aa_now() > 1 && gc.resolved() ? gc.resolved() : gc.target()) : tex, nullptr, nullptr);
+			{
+			SDL_Texture *picture=show_target ? (aa_now()>1 && gc.resolved()?gc.resolved():gc.target()):tex;
+#if defined(VF1_IOS)
+			picture=output.resolve(picture,cfg.ios_resolution==0,m.aspect());
+#endif
+			draw_game_picture(ren,picture,cfg.brightness);
+		}
 		draw_filter();
 		menu.render();
 		static const int shot_at = getenv("VF_SHOT_AT") ? atoi(getenv("VF_SHOT_AT")) : -1;   // testing: the window at that pass too
@@ -2817,6 +2861,7 @@ int main(int argc, char **argv)
 
 	}
 
+	gt.wait();
 	if (g3) fprintf(stderr, "the 3D at the end: %llu pictures drawn by the GPU, %llu checked against the CPU's, %llu differ; %llu drawn by the CPU instead, %llu GPU errors\n",
 					(unsigned long long)m.m_g3.pictures, (unsigned long long)m.m_g3.checked, (unsigned long long)m.m_g3.differ,
 					(unsigned long long)m.m_g3.cpu_fallback, (unsigned long long)m.m_g3.failed);
@@ -2826,7 +2871,7 @@ int main(int argc, char **argv)
 	g3.reset();                          // (its device goes before SDL does)
 	if (gpu_check) fprintf(stderr, "gpu check: %d pictures put together on the GPU checked, %d differ\n", gpu_checked, gpu_differ);
 	gc.release();                        // (its textures and shader go before the renderer)
-	if (quit_after >= 0 && !getenv("VF_SAVE")) { SDL_Quit(); return 0; }   // test runs leave the saves and settings alone (VF_SAVE: they save, as a player's)
+	if (quit_after >= 0 && !getenv("VF_SAVE")) { screen_glass.clear(); output.clear(); SDL_Quit(); return 0; }   // test runs leave the saves and settings alone (VF_SAVE: they save, as a player's)
 	keep_arcade_coins();
 	saver.finish();   // (an autosave still being written, done before the last save: the same files)
 	save_blob(nv_path, m.nvram().data(), m.nvram().size());
@@ -2837,6 +2882,20 @@ int main(int argc, char **argv)
 		cfg.aspect = aspect_i;
 		save_settings();
 	}
+#if defined(VF1_IOS)
+	ios_input_uninstall();
+#endif
+	screen_glass.clear(); output.clear();
 	SDL_Quit();
 	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	bool quit_application=false;
+	const int status=run_game(argc,argv,quit_application);
+#if defined(VF1_IOS)
+	if (quit_application) std::exit(status);
+#endif
+	return status;
 }
