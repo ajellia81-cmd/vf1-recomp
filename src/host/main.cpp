@@ -2129,7 +2129,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		menu_page pg{ "Controls", "", {} };
 #if defined(VF1_IOS)
 		pg.items.push_back({ "Vibration", "Impacts follow damage, with a longer finish on knockout.",
-			[&] { return cfg.haptics ? "On" : "Off"; }, [&](int) { cfg.haptics = !cfg.haptics; cfg_dirty = true; feedback.stop(pads); } });
+			[&] { return cfg.haptics ? "On" : "Off"; }, [&](int) { cfg.haptics = !cfg.haptics; cfg_dirty = true; feedback.stop(pads); if (cfg.haptics) ios_haptics_prepare(); else ios_haptics_suspend(); } });
 		pg.items.push_back({ "Vibration strength", "Overall intensity; does not change gameplay.", [&] { return std::to_string(cfg.haptic_strength) + "%"; },
 			[&](int d) { cfg.haptic_strength = std::clamp(cfg.haptic_strength + 10*d, 0, 100); cfg_dirty = true; } });
 		pg.items.push_back({ "Vibration players", "Choose who receives feedback. With Both, phone fallback follows player 1; controllers follow their assigned player.",

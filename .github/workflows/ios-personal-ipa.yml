@@ -29,7 +29,7 @@ jobs:
           path: |
             ios/Dependencies/*.xcframework
             ios/build/licenses
-          key: ios-static-${{ runner.os }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('ios/Dependencies/versions.env', 'ios/Scripts/prepare-dependencies.sh') }}
+          key: ios-static-${{ runner.os }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('ios/Dependencies/versions.env', 'ios/Scripts/prepare-dependencies.sh', 'ios/Scripts/patch-sdl-haptics.py', 'ios/Scripts/ios_rumble_async.inc') }}
       - name: Prepare redistributable libraries only
         if: steps.dependencies.outputs.cache-hit != 'true'
         run: sh ios/Scripts/prepare-dependencies.sh
@@ -66,6 +66,12 @@ jobs:
           python3 ios/Scripts/prepare-app-icon.py
           xcodegen generate --spec ios/project.yml
           python3 ios/Scripts/verify-project.py
+      - name: Verify nonblocking controller warmup and scalar diagnostic bounds
+        run: |
+          xcrun clang -fobjc-arc -fblocks tools/checks/ios_rumble_async.m -framework Foundation -o ios/build/rumble-async
+          ios/build/rumble-async
+          xcrun clang++ -std=c++20 -O2 -Wall -Wextra -Werror -Isrc/machine tools/checks/combat_probe.cpp -o ios/build/combat-probe
+          ios/build/combat-probe
       - name: Verify combat haptics without game data
         run: |
           xcrun clang++ -std=c++20 -O2 -Wall -Wextra -Werror tools/checks/fight_haptics.cpp -o ios/build/fight-haptics
@@ -105,8 +111,8 @@ jobs:
         run: python3 ios/Scripts/package-personal-ipa.py
       - uses: actions/upload-artifact@v4
         with:
-          name: VirtuaFighter-build4-${{ github.sha }}
-          path: ios/build/personal/VirtuaFighter-build4-unsigned.ipa
+          name: VirtuaFighter-build5-${{ github.sha }}
+          path: ios/build/personal/VirtuaFighter-build5-unsigned.ipa
           if-no-files-found: error
           retention-days: 3
           compression-level: 0

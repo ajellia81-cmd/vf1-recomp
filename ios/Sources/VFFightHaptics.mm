@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #include "../../src/host/ios_haptics.h"
 #include <algorithm>
+#include <cstdio>
 
 static dispatch_queue_t feedbackQueue() {
  static dispatch_queue_t q; static dispatch_once_t once;
@@ -11,6 +12,7 @@ static dispatch_queue_t feedbackQueue() {
 @interface VFFightPhoneHaptics : NSObject
 - (void)submitLow:(float)low high:(float)high milliseconds:(unsigned)ms active:(BOOL)active close:(BOOL)close;
 - (void)processLatest;
+- (void)stop;
 - (BOOL)prepare;
 - (void)invalidate;
 - (void)dispose;
@@ -34,6 +36,10 @@ static dispatch_queue_t feedbackQueue() {
   if (!_scheduled) { _scheduled=YES; dispatch_async(feedbackQueue(), ^{ [self processLatest]; }); }
  }
  [_lock unlock];
+}
+- (void)stop {
+ [_lock lock]; BOOL active=_active; [_lock unlock];
+ [self submitLow:0 high:0 milliseconds:0 active:active close:NO];
 }
 - (BOOL)prepare {
  if (_player) return YES;
@@ -114,6 +120,6 @@ void ios_haptics_play(float low,float high,unsigned ms) {
  if (!phone) phone=[VFFightPhoneHaptics new];
  [phone submitLow:low high:high milliseconds:ms active:YES close:NO];
 }
-void ios_haptics_stop() { [phone submitLow:0 high:0 milliseconds:0 active:(UIApplication.sharedApplication.applicationState==UIApplicationStateActive) close:NO]; }
+void ios_haptics_stop() { [phone stop]; }
 void ios_haptics_suspend() { [phone submitLow:0 high:0 milliseconds:0 active:NO close:NO]; }
 void ios_haptics_shutdown() { [phone submitLow:0 high:0 milliseconds:0 active:NO close:YES]; phone=nil; }
