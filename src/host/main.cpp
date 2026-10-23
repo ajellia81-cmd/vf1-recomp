@@ -1559,6 +1559,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	SDL_Gamepad *pads[2] = { nullptr, nullptr };
 #if defined(VF1_IOS)
 	ios_fight_haptics feedback;
+	if (cfg.haptics) ios_haptics_prepare();
 #endif
 	bool &pads_swapped = cfg.pads_swapped;           // two pads that look alike (same GUID): swapped by hand
 	auto guid_of = [](SDL_JoystickID id) {
@@ -2258,7 +2259,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		void stop(){if(installed){SDL_RemoveEventWatch(watch,this);installed=false;}}
 		~background_save(){stop();}
 	} lifecycle{[&] {
-		gt.wait(); feedback.stop(pads); ios_input_reset(); keep_arcade_coins(); saver.flush();
+		gt.wait(); feedback.stop(pads); ios_haptics_suspend(); ios_input_reset(); keep_arcade_coins(); saver.flush();
 		save_blob(nv_path,m.nvram().data(),m.nvram().size());
 		save_blob(ee_path,m.eeprom(),model1::EEPROM_SIZE); save_rank_names(true);
 		if(cfg_dirty && save_settings())cfg_dirty=false;

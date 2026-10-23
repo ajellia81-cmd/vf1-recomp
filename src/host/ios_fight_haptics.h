@@ -19,6 +19,7 @@ public:
 			changed |= id != identities[p]; identities[p] = id;
 		}
 		if (changed || blocked != was_blocked) stop(pads);
+		if ((changed || blocked != was_blocked) && !blocked) ios_haptics_prepare();
 		was_blocked = blocked;
 	}
 	void play(SDL_Gamepad *const pads[2], int player, const fight_haptics::Pulse &pulse, unsigned selected) {

@@ -26,3 +26,16 @@ Only selected human player sides receive feedback.
 Synthetic tests check event extraction, routing, strength, KO, duplicate frames, resets,
 invalid values and adapter gates without game data. Apple CI checks compilation; physical
 iPhone/controller feel and exact game-transition timing still require device testing.
+
+## Cold-start preparation
+
+Phone engine startup and player creation run on a dedicated serial queue, prepared
+when feedback is enabled/foregrounded. The engine stays warm during foreground
+play; background and exit dispose it. Stops replace queued hits; effects older
+than 100 ms are dropped after cold initialization. Reset recovery is silent.
+The pinned SDL Apple driver uses the same off-thread motor preparation and
+coalesced state updates validated by the personal Daytona build 8. Opening a
+controller no longer creates native engines under SDL's joystick lock.
+
+This removes synchronous cold engine work from the rendering thread. Physical
+frame pacing and haptic timing must still be checked on the user's device.

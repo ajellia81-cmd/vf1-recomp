@@ -16,6 +16,7 @@ checkout() {
 }
 checkout SDL https://github.com/libsdl-org/SDL.git "$SDL_REVISION"
 checkout FreeType https://github.com/freetype/freetype.git "$FREETYPE_REVISION"
+python3 "$root/Scripts/patch-sdl-haptics.py" "$work/SDL"
 for sdk in iphoneos iphonesimulator; do
     prefix="$work/install-$sdk"
     sysroot=$(xcrun --sdk "$sdk" --show-sdk-path)
