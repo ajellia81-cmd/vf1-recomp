@@ -17,6 +17,8 @@
 #if defined(VF1_IOS)
 #include "ios_platform.h"
 #include "ios_input.h"
+#include "ios_fight_haptics.h"
+#include "fight_haptics_vf1.h"
 #if !defined(VF1_DISABLE_JIT) || defined(VF_NATIVE)
 #error "iOS must remain interpreter-only"
 #endif
@@ -393,6 +395,8 @@ struct settings
 {
 	int scale = 2, aspect = 0, volume = 100, music = 100, effects = 100, aa = 1, filter = 0, ring = 0;
 	int brightness = 100, ios_resolution = 0;
+	bool haptics = true;
+	int haptic_strength = 75, haptic_players = 1;
 	bool smooth_motion = true, pads_swapped = false;
 	int renderer3d = 2;     // the 3D's renderer: 0 the CPU, 1 the GPU, 2 Auto (whichever is quicker here)
 	int graphics = 0;       // Windows: the GPU's driver, from the next start: 0 Auto (Vulkan first, Direct3D 12 if it won't start), 1 Direct3D 12
@@ -429,6 +433,7 @@ struct settings
 		auto flag = [&](const char *k, bool &v) { int i = v; num(k, i, 0, 1); v = i; };
 		num("scale", scale, 1, 6);
 		num("brightness", brightness, 50, 200);
+		flag("haptics", haptics); num("haptic_strength", haptic_strength, 0, 100); num("haptic_players", haptic_players, 1, 3);
 		num("ios_resolution", ios_resolution, 0, 6);
 		flag("smooth_motion", smooth_motion);
 		flag("pads_swapped", pads_swapped);
@@ -499,6 +504,7 @@ struct settings
 			return false;
 		}
 		fprintf(f, "# Virtua Fighter settings (the in-game menu writes these)\n");
+		fprintf(f, "haptics = %d\nhaptic_strength = %d\nhaptic_players = %d\n", int(haptics), haptic_strength, haptic_players);
 		fprintf(f, "scale = %d\npicture_shape = %d\nfullscreen = %d\nframe_timings = %d\nvolume = %d\narcade_mode = %d\n"
 				"background_filter = %d\nmusic_volume = %d\neffects_volume = %d\nantialiasing = %d\nshow_fps = %d\nscreen_filter = %d\nring_size = %d\n", scale, aspect,
 				int(fullscreen), int(timings), volume, int(arcade), int(smooth_bg), music, effects, aa, int(show_fps), filter, ring);
@@ -1551,6 +1557,9 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	constexpr int QUEUED = 3;            // frames of sound kept queued: the slack for a slow or late screen
 
 	SDL_Gamepad *pads[2] = { nullptr, nullptr };
+#if defined(VF1_IOS)
+	ios_fight_haptics feedback;
+#endif
 	bool &pads_swapped = cfg.pads_swapped;           // two pads that look alike (same GUID): swapped by hand
 	auto guid_of = [](SDL_JoystickID id) {
 		char g[64];
@@ -1560,6 +1569,9 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	// each player's pad: the one chosen (by its GUID) if it is there, else the next free one
 	// ("auto"), or none
 	auto open_pads = [&] {
+#if defined(VF1_IOS)
+		feedback.stop(pads);
+#endif
 		for (auto &pd : pads) if (pd) { SDL_CloseGamepad(pd); pd = nullptr; }
 		int n = 0;
 		SDL_JoystickID *ids = SDL_GetGamepads(&n);
@@ -1619,6 +1631,9 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	// the arcade settings as their page opened (and the ring): see arcade_page
 	std::optional<std::array<int, 12>> assign_before;
 	auto reset_game = [&](bool keep_coins = true) {
+#if defined(VF1_IOS)
+		feedback.stop(pads);
+#endif
 		assign_before.reset();   // a restart applies them
 		if (keep_coins) keep_arcade_coins();     // (Arcade: as the service menu may have left them)
 		menu.close();
@@ -2111,6 +2126,17 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	};
 	auto controls_page = [&] {
 		menu_page pg{ "Controls", "", {} };
+#if defined(VF1_IOS)
+		pg.items.push_back({ "Vibration", "Impacts follow damage, with a longer finish on knockout.",
+			[&] { return cfg.haptics ? "On" : "Off"; }, [&](int) { cfg.haptics = !cfg.haptics; cfg_dirty = true; feedback.stop(pads); } });
+		pg.items.push_back({ "Vibration strength", "Overall intensity; does not change gameplay.", [&] { return std::to_string(cfg.haptic_strength) + "%"; },
+			[&](int d) { cfg.haptic_strength = std::clamp(cfg.haptic_strength + 10*d, 0, 100); cfg_dirty = true; } });
+		pg.items.push_back({ "Vibration players", "Choose who receives feedback. With Both, phone fallback follows player 1; controllers follow their assigned player.",
+			[&] { return cfg.haptic_players == 3 ? "Both" : cfg.haptic_players == 2 ? "Player 2" : "Player 1"; },
+			[&](int d) { cfg.haptic_players = 1 + (cfg.haptic_players - 1 + d + 3) % 3; cfg_dirty = true; feedback.stop(pads); } });
+		pg.items.push_back({ "Test vibration", "Play a short test on the selected controller or phone fallback.", {}, {},
+			[&] { if (cfg.haptics) feedback.test(pads, cfg.haptic_players, cfg.haptic_strength); } });
+#endif
 		pg.items.push_back({ "Player 1", "Player 1's controller, keys and buttons.", [&] { return pad_name(0); }, {},
 							 [&] { menu.push(player_page(0)); } });
 		pg.items.push_back({ "Player 2", "Player 2's controller, keys and buttons.", [&] { return pad_name(1); }, {},
@@ -2232,7 +2258,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		void stop(){if(installed){SDL_RemoveEventWatch(watch,this);installed=false;}}
 		~background_save(){stop();}
 	} lifecycle{[&] {
-		gt.wait(); ios_input_reset(); keep_arcade_coins(); saver.flush();
+		gt.wait(); feedback.stop(pads); ios_input_reset(); keep_arcade_coins(); saver.flush();
 		save_blob(nv_path,m.nvram().data(),m.nvram().size());
 		save_blob(ee_path,m.eeprom(),model1::EEPROM_SIZE); save_rank_names(true);
 		if(cfg_dirty && save_settings())cfg_dirty=false;
@@ -2267,6 +2293,9 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	};
 	bool curtain_on_gpu = false;       // a curtain shown during a hold, put together by the GPU
 	auto after_frame = [&](bool ff) -> bool {
+#if defined(VF1_IOS)
+		feedback.frame(vf1_haptic_snapshot(m.nvram(), m.work_ram(), m.frame_number()), pads, cfg.haptics, ff || paused || menu.is_open(), cfg.haptic_players, cfg.haptic_strength);
+#endif
 				game_run++;
 				// leaving the service menu: the PC build restarts at once, past the boot screen
 				if (g_left_test_menu) { g_left_test_menu = false; if (g_pc_mode) { reset_game(); m.m_audio_out.clear(); return false; } }
@@ -2321,6 +2350,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	};
 	while (running) {
 #if defined(VF1_IOS)
+		feedback.sync(pads, !cfg.haptics || paused || menu.is_open());
 		ios = ios_input_read();
 		if (ios.menu_pressed) { if(menu.is_open())menu.close();else open_menu();ios.menu_pressed=false; }
 		ios_input_set_menu(menu.is_open());
@@ -2857,6 +2887,9 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	}
 
 	gt.wait();
+#if defined(VF1_IOS)
+	feedback.stop(pads); ios_haptics_shutdown();
+#endif
 	if (g3) fprintf(stderr, "the 3D at the end: %llu pictures drawn by the GPU, %llu checked against the CPU's, %llu differ; %llu drawn by the CPU instead, %llu GPU errors\n",
 					(unsigned long long)m.m_g3.pictures, (unsigned long long)m.m_g3.checked, (unsigned long long)m.m_g3.differ,
 					(unsigned long long)m.m_g3.cpu_fallback, (unsigned long long)m.m_g3.failed);
