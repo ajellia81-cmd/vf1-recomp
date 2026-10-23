@@ -61,3 +61,13 @@ The observation establishes the missing event in the supplied VF1 session; broad
 physical-device and move coverage still needs confirmation. No VF2 addresses are inferred.
 No ROM bytes, disassembly or generated game code are used. Scalar diagnostics remain
 available under Controls > Save hit diagnostics for further validation.
+
+
+## Post-KO intensity audit
+
+The verified pre-clamp writer retains actual damage after KO. The response curve
+uses that damage exactly as in a normal hit; there is no post-KO gain reduction.
+Only the original positive-to-zero transition adds a long KO tail. Synthetic
+comparisons for damage 1/4/12/30, both victims and strengths 0/25/75/100 confirm
+identical normal/post-KO amplitude and ordinary duration. No runtime change was
+needed for VF1. Physical feel remains device-dependent.

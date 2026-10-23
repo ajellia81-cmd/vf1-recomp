@@ -29,6 +29,18 @@ int main() {
   ++s.frame;s.damage_total[victim]=0;assert(!t.advance(s,3,75)[0].ms); // reset, no unsigned underflow
   ++s.frame;s.damage_total[victim]+=30;s.epoch++;assert(!t.advance(s,3,75)[0].ms);
  }
+ // Identical measured damage has identical amplitude/duration before and after KO.
+ for(int damage : {1,4,12,30}) for(int gain : {0,25,75,100}) for(int victim=0;victim<2;++victim) {
+  Tracker normal,post;Snapshot a{1,0,true,{176,176},176,3};a.damage_events=true;
+  Snapshot b=a;b.health[victim]=0;normal.advance(a,3,gain);post.advance(b,3,gain);
+  ++a.frame;++b.frame;a.health[victim]-=damage;
+  a.damage_total[victim]=b.damage_total[victim]=damage;
+  auto n=normal.advance(a,3,gain),p=post.advance(b,3,gain);
+  for(int player=0;player<2;++player) {
+   assert(n[player].low==p[player].low && n[player].high==p[player].high);
+   assert(n[player].ms==p[player].ms && !p[player].knockout);
+  }
+ }
  // A health decrease plus a matching event is one hit, not two summed strengths.
  Tracker a,b;Snapshot s{1,0,true,{176,176},176,3};a.advance(s,3,75);
  s.damage_events=true;b.advance(s,3,75);++s.frame;s.health[1]-=4;s.damage_total[1]=4;
