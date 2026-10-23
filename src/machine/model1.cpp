@@ -414,7 +414,17 @@ void model1::bus_write16(uint32_t a, uint16_t v, uint16_t mask)
 		if (mask & 0xff00) p[1] = uint8_t(v >> 8);
 	};
 	auto combine = [&](uint16_t &d) { d = (d & ~mask) | (v & mask); };
-	if (a >= 0x400000 && a < 0x410000) { wr(&m_ram_a[a - 0x400000]); return; }
+	if (a >= 0x400000 && a < 0x410000) {
+#if defined(VF1_IOS)
+  const uint32_t base=m_ram_b[0x130c] | (m_ram_b[0x130d]<<8) | (m_ram_b[0x130e]<<16) | (uint32_t(m_ram_b[0x130f])<<24);
+  if (a+0x2e==base || a+0x2e==base+0x1800) {
+   const unsigned o=a-0x400000; unsigned old=m_ram_a[o] | (m_ram_a[o+1]<<8);
+   haptic_probe.record(m_frame,m_maincpu.pc(),a+0x2e==base?1:2,int16_t(old),int16_t((old&~mask)|(v&mask)),
+    (m_ram_a[0x7483]|m_ram_a[0x7503])&8,m_ram_a[0x183]>>7,m_ram_a[0x203]>>7);
+  }
+#endif
+  wr(&m_ram_a[a-0x400000]); return;
+ }
 	if (a >= 0x500000 && a < 0x540000) { wr(&m_ram_b[a - 0x500000]); return; }
 	if (a >= 0x600000 && a < 0x610000) { combine(m_display_list0[(a - 0x600000) >> 1]); m_list_written[0] = m_frame; return; }
 	if (a >= 0x610000 && a < 0x620000) { combine(m_display_list1[(a - 0x610000) >> 1]); m_list_written[1] = m_frame; return; }

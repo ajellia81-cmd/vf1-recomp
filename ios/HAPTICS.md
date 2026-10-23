@@ -39,3 +39,14 @@ controller no longer creates native engines under SDL's joystick lock.
 
 This removes synchronous cold engine work from the rendering thread. Physical
 frame pacing and haptic timing must still be checked on the user's device.
+
+## Post-KO diagnostic limitation
+
+Health loss alone cannot identify a hit that leaves health unchanged. It must not
+be synthesized from an attack button or arbitrary animation. The app keeps a
+bounded ring of scalar stores to the documented health fields (including zero-to-zero),
+with frame, instruction address, side and scene flags. Controls > Save hit diagnostics
+exports haptics-hit-diagnostics.csv after the emulation worker has stopped.
+No file I/O occurs on the emulation/rendering hot path. No ROM bytes or memory dump
+is captured. Stores themselves are not assumed to be hits. Post-KO feedback remains
+unresolved until a contact signal and replay exclusion are verified.
