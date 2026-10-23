@@ -1,3 +1,4 @@
+# Build 5 retry: join callback is installed after the worker is constructed.
 name: Personal unsigned iOS IPA (Model 1)
 on:
   push:
