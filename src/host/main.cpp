@@ -2304,7 +2304,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	bool curtain_on_gpu = false;       // a curtain shown during a hold, put together by the GPU
 	auto after_frame = [&](bool ff) -> bool {
 #if defined(VF1_IOS)
-		feedback.frame(vf1_haptic_snapshot(m.nvram(), m.work_ram(), m.frame_number()), pads, cfg.haptics, ff || paused || menu.is_open(), cfg.haptic_players, cfg.haptic_strength);
+		feedback.frame(vf1_haptic_snapshot(m.nvram(), m.work_ram(), m.frame_number(), m.haptic_damage_total), pads, cfg.haptics, ff || paused || menu.is_open(), cfg.haptic_players, cfg.haptic_strength);
 #endif
 				game_run++;
 				// leaving the service menu: the PC build restarts at once, past the boot screen

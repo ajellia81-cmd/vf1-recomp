@@ -2,8 +2,9 @@
 #include "fight_haptics.h"
 #include <vector>
 // Read-only addresses documented by model1::fight_cheats and vfscript.
-inline fight_haptics::Snapshot vf1_haptic_snapshot(const std::vector<uint8_t> &nv, const std::vector<uint8_t> &work, uint64_t frame) {
+inline fight_haptics::Snapshot vf1_haptic_snapshot(const std::vector<uint8_t> &nv, const std::vector<uint8_t> &work, uint64_t frame, const uint64_t *damage_total = nullptr) {
 	fight_haptics::Snapshot s; s.frame = frame;
+	if (damage_total) { s.damage_events=true; s.damage_total[0]=damage_total[0]; s.damage_total[1]=damage_total[1]; }
 	if (nv.size() < 0x7600 || work.size() < 0x1310) return s;
 	auto byte = [&](uint32_t a) -> uint32_t {
 		if (a >= 0x400000 && a - 0x400000 < nv.size()) return nv[a - 0x400000];

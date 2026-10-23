@@ -35,6 +35,7 @@ class model1 : public v60_bus
 public:
 #if defined(VF1_IOS)
 	combat_probe haptic_probe;
+	uint64_t haptic_damage_total[2]{};
 #endif
 	// Screen: 496x384, 60 Hz (MAME: 16 MHz pixel clock, 656x426 total)
 	static constexpr int SCREEN_W = 496, SCREEN_H = 384;

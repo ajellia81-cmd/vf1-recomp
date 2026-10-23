@@ -1,3 +1,6 @@
+#if defined(VF1_IOS)
+#include "../host/vf1_damage_events.h"
+#endif
 // Sega Model 1 glue: memory map, IRQ controller, timers, ROM banking and the per-frame loop.
 // Follows MAME's src/mame/sega/model1.cpp (BSD-3-Clause, copyright-holders: Olivier Galibert).
 #include <chrono>
@@ -419,7 +422,11 @@ void model1::bus_write16(uint32_t a, uint16_t v, uint16_t mask)
   const uint32_t base=m_ram_b[0x130c] | (m_ram_b[0x130d]<<8) | (m_ram_b[0x130e]<<16) | (uint32_t(m_ram_b[0x130f])<<24);
   if (a+0x2e==base || a+0x2e==base+0x1800) {
    const unsigned o=a-0x400000; unsigned old=m_ram_a[o] | (m_ram_a[o+1]<<8);
-   haptic_probe.record(m_frame,m_maincpu.pc(),a+0x2e==base?1:2,int16_t(old),int16_t((old&~mask)|(v&mask)),
+   const int side=a+0x2e==base?0:1;
+   const int after=int16_t((old&~mask)|(v&mask));
+   const bool live=((m_ram_a[0x7483]|m_ram_a[0x7503])&8) && (m_ram_a[0x183]&0x80) && (m_ram_a[0x203]&0x80);
+   haptic_damage_total[side]+=vf1_damage_store(m_maincpu.pc(),mask,int16_t(old),after,live);
+   haptic_probe.record(m_frame,m_maincpu.pc(),side+1,int16_t(old),after,
     (m_ram_a[0x7483]|m_ram_a[0x7503])&8,m_ram_a[0x183]>>7,m_ram_a[0x203]>>7);
   }
 #endif

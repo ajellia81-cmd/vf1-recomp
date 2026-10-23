@@ -40,13 +40,24 @@ controller no longer creates native engines under SDL's joystick lock.
 This removes synchronous cold engine work from the rendering thread. Physical
 frame pacing and haptic timing must still be checked on the user's device.
 
-## Post-KO diagnostic limitation
+## Pre-clamp damage contacts (build 6)
 
-Health loss alone cannot identify a hit that leaves health unchanged. It must not
-be synthesized from an attack button or arbitrary animation. The app keeps a
-bounded ring of scalar stores to the documented health fields (including zero-to-zero),
-with frame, instruction address, side and scene flags. Controls > Save hit diagnostics
-exports haptics-hit-diagnostics.csv after the emulation worker has stopped.
-No file I/O occurs on the emulation/rendering hot path. No ROM bytes or memory dump
-is captured. Stores themselves are not assumed to be hits. Post-KO feedback remains
-unresolved until a contact signal and replay exclusion are verified.
+The user's build 5 scalar trace identifies a real damage store at guest PC 0xFFBB96.
+At frame 2010 it writes 22 -> -8, then 0xFFBB9C clamps -8 -> 0. After KO, frame
+2108 writes 0 -> -30 at the same damage PC and clamps -30 -> 0 at the same clamp PC.
+Both round/replay gates remain active. Sampling only at frame end loses this hit.
+
+The iOS bus observes full-word health stores at the verified damage PC while a human
+side and both existing live gates are active. It accumulates positive damage before
+clamping, without changing game memory or CPU execution. Snapshots consume these
+monotonic totals once per original frame; health loss is not counted a second time.
+Only the transition from positive final health to zero gets a KO tail. Later contacts
+at zero health receive ordinary impacts, retaining damage-dependent strength and
+player routing. The clamp, setup writes, partial stores and inactive scenes are ignored.
+
+Synthetic checks reproduce the observed subtract/clamp sequences for both sides and
+check duplicate frames, routing, stale/reset totals, replay gating and no double-counting.
+The observation establishes the missing event in the supplied VF1 session; broader
+physical-device and move coverage still needs confirmation. No VF2 addresses are inferred.
+No ROM bytes, disassembly or generated game code are used. Scalar diagnostics remain
+available under Controls > Save hit diagnostics for further validation.
