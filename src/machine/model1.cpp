@@ -426,8 +426,6 @@ void model1::bus_write16(uint32_t a, uint16_t v, uint16_t mask)
    const int after=int16_t((old&~mask)|(v&mask));
    const bool live=((m_ram_a[0x7483]|m_ram_a[0x7503])&8) && (m_ram_a[0x183]&0x80) && (m_ram_a[0x203]&0x80);
    haptic_damage_total[side]+=vf1_damage_store(m_maincpu.pc(),mask,int16_t(old),after,live);
-   haptic_probe.record(m_frame,m_maincpu.pc(),side+1,int16_t(old),after,
-    (m_ram_a[0x7483]|m_ram_a[0x7503])&8,m_ram_a[0x183]>>7,m_ram_a[0x203]>>7);
   }
 #endif
   wr(&m_ram_a[a-0x400000]); return;

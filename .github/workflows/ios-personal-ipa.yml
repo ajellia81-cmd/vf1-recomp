@@ -1,4 +1,4 @@
-# Build 5 retry: join callback is installed after the worker is constructed.
+# Build 7: clean personal IPA without diagnostic UI, capture or CSV export.
 name: Personal unsigned iOS IPA (Model 1)
 on:
   push:
@@ -114,8 +114,8 @@ jobs:
         run: python3 ios/Scripts/package-personal-ipa.py
       - uses: actions/upload-artifact@v4
         with:
-          name: VirtuaFighter-build6-${{ github.sha }}
-          path: ios/build/personal/VirtuaFighter-build6-unsigned.ipa
+          name: VirtuaFighter-build7-clean-${{ github.sha }}
+          path: ios/build/personal/VirtuaFighter-build7-clean-unsigned.ipa
           if-no-files-found: error
           retention-days: 3
           compression-level: 0

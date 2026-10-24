@@ -2,9 +2,7 @@
 // C functions (MAME 0.210's simulation) and the polygon rasterizer (MAME's model1_v.cpp).
 // Ported from MAME's Model 1 driver, BSD-3-Clause, copyright-holders: Olivier Galibert.
 #pragma once
-#if defined(VF1_IOS)
-#include "combat_probe.h"
-#endif
+#include <cstdint>
 #include <algorithm>
 #include <cstdlib>
 #include "parallel.h"
@@ -34,7 +32,6 @@ class model1 : public v60_bus
 {
 public:
 #if defined(VF1_IOS)
-	combat_probe haptic_probe;
 	uint64_t haptic_damage_total[2]{};
 #endif
 	// Screen: 496x384, 60 Hz (MAME: 16 MHz pixel clock, 656x426 total)

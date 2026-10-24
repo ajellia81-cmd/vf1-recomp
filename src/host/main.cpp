@@ -2125,10 +2125,6 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		pg.items.push_back(back_item());
 		return pg;
 	};
-	// Installed once the game worker exists, before menu events can run.
-#if defined(VF1_IOS)
-	std::function<void()> wait_for_haptic_probe;
-#endif
 	auto controls_page = [&] {
 		menu_page pg{ "Controls", "", {} };
 #if defined(VF1_IOS)
@@ -2139,10 +2135,7 @@ static int run_game(int argc, char **argv, bool &quit_application)
 		pg.items.push_back({ "Vibration players", "Choose who receives feedback. With Both, phone fallback follows player 1; controllers follow their assigned player.",
 			[&] { return cfg.haptic_players == 3 ? "Both" : cfg.haptic_players == 2 ? "Player 2" : "Player 1"; },
 			[&](int d) { cfg.haptic_players = 1 + (cfg.haptic_players - 1 + d + 3) % 3; cfg_dirty = true; feedback.stop(pads); } });
-		pg.items.push_back({ "Test vibration", "Play a short test on the selected controller or phone fallback.", {}, {},
-			[&] { if (cfg.haptics) feedback.test(pads, cfg.haptic_players, cfg.haptic_strength); } });
-		pg.items.push_back({ "Save hit diagnostics", "After a missed post-KO impact, save scalar health-store observations to haptics-hit-diagnostics.csv in the app data folder.", {}, {},
-			[&] { wait_for_haptic_probe(); bool ok=m.haptic_probe.save((dir + "/haptics-hit-diagnostics.csv").c_str()); fprintf(stderr,"haptics: diagnostic export %s\n",ok ? "saved" : "failed"); } });
+
 #endif
 		pg.items.push_back({ "Player 1", "Player 1's controller, keys and buttons.", [&] { return pad_name(0); }, {},
 							 [&] { menu.push(player_page(0)); } });
@@ -2251,9 +2244,6 @@ static int run_game(int argc, char **argv, bool &quit_application)
 	};
 	static const bool no_game_thread = getenv("VF_NO_GAME_THREAD") != nullptr;
 	game_thread gt;
-#if defined(VF1_IOS)
-	wait_for_haptic_probe = [&] { gt.wait(); };
-#endif
 #if defined(VF1_IOS)
 	// UIKit may suspend us before the next SDL_PollEvent. Save while its
 	// main-thread lifecycle event is dispatched, after any frame has finished.
