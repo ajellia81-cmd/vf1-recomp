@@ -18,6 +18,10 @@ inline fight_haptics::Snapshot vf1_haptic_snapshot(const std::vector<uint8_t> &n
 	s.maximum = word(0x501186);
 	s.health[0] = int16_t(word(base - 0x2e)); s.health[1] = int16_t(word(base + 0x1800 - 0x2e));
 	s.players = ((nv[0x7483] & 8) ? 1u : 0u) | ((nv[0x7503] & 8) ? 2u : 0u);
-	s.live = s.players && (word(0x400182) & 0x8000) && (word(0x400202) & 0x8000);
+	const bool round_live=(word(0x400182) & 0x8000) && (word(0x400202) & 0x8000);
+	// After KO (including the victory-pose interval), require verified damage
+	// stores, not frame-end HP deltas from replay/setup transitions.
+	s.event_only=!round_live;
+	s.live = s.players && (round_live || (s.damage_events && (s.health[0]==0 || s.health[1]==0)));
 	return s;
 }

@@ -424,7 +424,10 @@ void model1::bus_write16(uint32_t a, uint16_t v, uint16_t mask)
    const unsigned o=a-0x400000; unsigned old=m_ram_a[o] | (m_ram_a[o+1]<<8);
    const int side=a+0x2e==base?0:1;
    const int after=int16_t((old&~mask)|(v&mask));
-   const bool live=((m_ram_a[0x7483]|m_ram_a[0x7503])&8) && (m_ram_a[0x183]&0x80) && (m_ram_a[0x203]&0x80);
+   const bool match=(m_ram_a[0x7483]|m_ram_a[0x7503])&8;
+   const bool round_live=(m_ram_a[0x183]&0x80) && (m_ram_a[0x203]&0x80);
+   // The verified subtraction still means contact at zero HP after the round.
+   const bool live=match && (round_live || int16_t(old)==0);
    haptic_damage_total[side]+=vf1_damage_store(m_maincpu.pc(),mask,int16_t(old),after,live);
   }
 #endif

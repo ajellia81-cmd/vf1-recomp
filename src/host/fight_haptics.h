@@ -12,6 +12,7 @@ struct Snapshot {
 	unsigned players = 3;
 	bool damage_events = false;
 	uint64_t damage_total[2]{}, contact_total[2]{};
+	bool event_only=false; // post-round: never infer damage from replay health changes
 };
 struct Pulse {
 	float low = 0, high = 0;
@@ -43,7 +44,11 @@ public:
 				int damage = previous.health[victim] - s.health[victim];
 				if (s.damage_events) {
 					if (s.damage_total[victim] < previous.damage_total[victim]) continue;
-					damage = int(std::min<uint64_t>(1000, s.damage_total[victim] - previous.damage_total[victim]));
+					// Some damage paths (including throws) do not use the observed strike PC.
+					// Keep real health loss as a lower bound, without summing the same hit
+					// twice. Pre-clamp totals still preserve zero-health post-KO strikes.
+					const int observed=int(std::min<uint64_t>(1000, s.damage_total[victim] - previous.damage_total[victim]));
+					damage = s.event_only ? observed : std::max(damage, observed);
 				}
 				const bool contact = s.damage_events && s.contact_total[victim] > previous.contact_total[victim];
 				if (damage <= 0 && !contact) continue;
